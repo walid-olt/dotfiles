@@ -164,6 +164,11 @@ else
     info "Resolving packages against official repos..."
 
     for pkg in "${PACKAGES[@]}"; do
+        # Allow explanatory inline comments in packages.txt.
+        pkg="${pkg%%#*}"
+        pkg="${pkg#"${pkg%%[![:space:]]*}"}"
+        pkg="${pkg%"${pkg##*[![:space:]]}"}"
+        [[ -z "$pkg" ]] && continue
         if pacman -Si "$pkg" >/dev/null 2>&1; then
             OFFICIAL_PACKAGES+=("$pkg")
         elif [[ -n "$AUR_HELPER" ]] && "$AUR_HELPER" -Si "$pkg" >/dev/null 2>&1; then
@@ -175,7 +180,7 @@ else
 
     if [[ "${#OFFICIAL_PACKAGES[@]}" -gt 0 ]]; then
         info "Installing official-repo packages..."
-        if sudo pacman -Syu --needed --noconfirm "${OFFICIAL_PACKAGES[@]}"; then
+        if sudo pacman -S --needed --noconfirm "${OFFICIAL_PACKAGES[@]}"; then
             success "Official-repo packages installed."
         else
             warning "pacman reported an error installing one or more official-repo packages. Continuing anyway."

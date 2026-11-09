@@ -1,5 +1,7 @@
 eval "$(starship init zsh)"
 
+export HYPRLAND_CONFIG="$HOME/.config/hypr/hyprland.lua"
+
 # Monochrome eza
 export EZA_COLORS="uu=bright-black:gu=bright-black:da=bright-black:ur=white:uw=bright-black:ux=white:ue=bright-black:gr=bright-black:gw=bright-black:gx=white:tr=bright-black:fi=white:di=bright-white:ln=bright-black:pi=bright-black:so=bright-black:bd=bright-black:cd=bright-black:or=bright-black:mi=bright-black:ex=white"
 
@@ -46,19 +48,25 @@ setopt HIST_IGNORE_DUPS
 setopt HIST_IGNORE_SPACE
 setopt HIST_REDUCE_BLANKS
 
-source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
+if [[ -r /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh ]]; then
+  source /usr/share/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh
+fi
 
 # Syntax highlighting
-source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+if [[ -r /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh ]]; then
+  source /usr/share/zsh/plugins/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+fi
 
 # Grayscale
-ZSH_HIGHLIGHT_STYLES[command]='fg=white'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=white'
-ZSH_HIGHLIGHT_STYLES[function]='fg=white'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=white'
-ZSH_HIGHLIGHT_STYLES[path]='fg=245'
-ZSH_HIGHLIGHT_STYLES[comment]='fg=240'
-ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=245'
+if (( ${+ZSH_HIGHLIGHT_STYLES} )); then
+  ZSH_HIGHLIGHT_STYLES[command]='fg=white'
+  ZSH_HIGHLIGHT_STYLES[builtin]='fg=white'
+  ZSH_HIGHLIGHT_STYLES[function]='fg=white'
+  ZSH_HIGHLIGHT_STYLES[alias]='fg=white'
+  ZSH_HIGHLIGHT_STYLES[path]='fg=245'
+  ZSH_HIGHLIGHT_STYLES[comment]='fg=240'
+  ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=245'
+fi
 
 
 # 43PR theme controller
