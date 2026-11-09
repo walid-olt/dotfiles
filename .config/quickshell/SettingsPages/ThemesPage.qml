@@ -7,16 +7,86 @@ import "../"
 Item {
     id: page
     property real marginLeft: 0
-    property real marginRight: 55
+    property real marginRight: 10
     property real marginTop: 0
     property real marginBottom: 0
     property real sectionSpacing: 6
+    property real buttonHeight: 42      // height of every toggle / action button
 
-    function editConfig(path) {
-        Quickshell.execDetached([
-            "xed",
-            path.replace(/^~/, Quickshell.env("HOME"))
-        ])
+    // ── Color picker hook ─────────────────────────────────────────────
+    // Option A: connect your own picker to this signal and call
+    //           page.setColor(key, "#rrggbb") when the user confirms.
+    signal colorPickRequested(string key, string current)
+
+    // Handled by the settings shell: hands keyboard focus back to the window
+    // so Esc (close) and Tab (next page) keep working after text fields.
+    signal searchFocusReleased()
+
+    // Option B: a CLI picker that prints the chosen color to stdout,
+    //           e.g. ["hyprpicker"]  (leave empty to use only Option A).
+    property var pickerCommand: []
+
+    // ── Editor state ──────────────────────────────────────────────────
+    property bool editing: false
+    property string editId: ""
+    property string editText: ""        // original toml text (comments preserved on save)
+    property bool editOverride: false
+    property string loadError: ""
+    property string pickingKey: ""
+    property int palRev: 0              // bumps when preview palettes change
+    property var palOverrides: ({})     // preset id -> palette array, built from saved toml
+    property bool hexTabbing: false     // true while focus is moving between hex fields
+
+    // ── New-theme (duplicate) state ───────────────────────────────────
+    property bool naming: false         // true while the name prompt is open
+    property string createMsg: ""       // error / status line under the prompt
+
+    // ── Delete state ──────────────────────────────────────────────────
+    property bool confirmDelete: false  // true after the first click on DELETE
+    // Only user-created themes can be deleted (never "default" or a built-in preset)
+    readonly property bool editIsCustom: page.editId !== ""
+                                         && page.editId !== "default"
+                                         && page.palettes[page.editId] === undefined
+
+    ListModel { id: colorModel }        // roles: key, value, grp
+    ListModel { id: customModel }       // roles: tid  (user-created themes found on disk)
+
+    // Order: bg, surface, fg, muted, accent, accent2
+    readonly property var palettes: ({
+        // Fixed preview for the DEFAULT button. Edit to match your default theme.
+        "default":          ["#000000", "#0d0d0d", "#ffffff", "#8b93a7", "#ffffff", '#e1e1e1'],
+        "catppuccin-mocha": ["#1e1e2e", "#313244", "#cdd6f4", "#6c7086", "#cba6f7", "#89b4fa"],
+        "one-dark":         ["#282c34", "#353b45", "#abb2bf", "#5c6370", "#61afef", "#c678dd"],
+        "tokyo-night":      ["#1a1b26", "#24283b", "#c0caf5", "#565f89", "#7aa2f7", "#bb9af7"],
+        "nord":             ["#2e3440", "#3b4252", "#d8dee9", "#616e88", "#88c0d0", "#81a1c1"],
+        "arctic":           ["#292E35", "#323943", "#E0E8F0", "#879FB4", "#7198B8", "#8CAFC8"],
+        "everforest-dark":  ["#2d353b", "#343f44", "#d3c6aa", "#859289", "#a7c080", "#7fbbb3"],
+        "kanagawa":         ["#1f1f28", "#2a2a37", "#dcd7ba", "#727169", "#7e9cd8", "#957fb8"],
+        "graphite":         ["#1c1c1e", "#2c2c2e", "#e5e5e7", "#6e6e73", "#8e8e93", "#aeaeb2"],
+        "slate":            ["#2B3438", "#354145", "#E0E7E9", "#879CA1", "#829599", "#7FA8AD"],
+        "matrix":           ["#000d00", "#001a00", "#00ff41", "#008f11", "#00ff41", "#39ff14"],
+        "dracula":          ["#282a36", "#44475a", "#f8f8f2", "#6272a4", "#bd93f9", "#ff79c6"],
+        "rose-pine":        ["#191724", "#1f1d2e", "#e0def4", "#6e6a86", "#ebbcba", "#c4a7e7"],
+        "light-gray":       ["#e5e7eb", "#d1d5db", "#1f2937", "#6b7280", "#374151", '#9bb1df'],
+        "metal":            ['#23272c', "#3a4046", "#cfd4d9", "#7b848c", "#9fb0bf", "#c0c8d0"],
+        "silver":           ['#C8CCD2', "#c4c8cc", "#23272b", "#6b7279", "#4b5563", "#7b8794"],
+        "beige":            ["#f1e9d8", "#e4d9c1", "#3b3228", "#8a7d6a", "#a0522d", "#b08968"],
+        "moss":             ["#1c2418", "#2a3524", "#d4e0c8", "#7a8c6a", "#8fbf6a", "#c4d86a"],
+        "gold":             ["#1a1608", "#2a2410", "#f5e6b8", "#8c7a3c", "#ffc832", "#e6a817"],
+        "red":              ["#1a0b0b", "#2a1212", "#f5d6d6", "#8c4a4a", "#ff3b3b", "#ff7a59"],
+        "cyan":             ["#0e1a1f", "#16282f", "#d6eef2", "#6a8f99", "#22d3ee", "#67e8f9"],
+        "gruvbox-dark":     ["#282828", "#3c3836", "#ebdbb2", "#928374", "#fabd2f", "#fe8019"],
+        "solarized-dark":   ["#002b36", "#073642", "#93a1a1", "#586e75", "#268bd2", "#2aa198"],
+        "monokai":          ["#272822", "#3e3d32", "#f8f8f2", "#75715e", "#a6e22e", "#f92672"],
+        "catppuccin-latte": ["#e6e9ef", "#ccd0da", "#4c4f69", "#8c8fa1", "#8839ef", "#1e66f5"],
+        "solarized-light":  ["#fdf6e3", "#eee8d5", "#073642", "#657b83", "#268bd2", "#2aa198"],
+        "gruvbox-light":    ["#fbf1c7", "#ebdbb2", "#3c3836", "#7c6f64", "#b57614", "#af3a03"]
+    })
+    function pal(id) {
+        var rev = page.palRev
+        var c = palOverrides[id] || palettes[id] || palettes["default"]
+        if (!c || c.length < 6) c = palettes["default"]
+        return { bg: c[0], surface: c[1], fg: c[2], muted: c[3], accent: c[4], accent2: c[5] }
     }
 
     function runTheme(themeCommand) {
@@ -35,6 +105,7 @@ Item {
 
     property bool colorGen: true
     property bool darkMode: true
+    property string activeId: "default"   // last applied preset
 
     FileView {
         id: stateView
@@ -45,11 +116,15 @@ Item {
         onLoaded: {
             page.colorGen = stateAdapter.colorgen
             page.darkMode = stateAdapter.mode_appearance !== "light"
+            // Optional: if theme.py writes a "preset" key, pick it up.
+            if (stateAdapter.preset !== "")
+                page.activeId = stateAdapter.preset
         }
         adapter: JsonAdapter {
             id: stateAdapter
             property bool colorgen: true
             property string mode_appearance: "dark"
+            property string preset: ""
         }
     }
 
@@ -69,6 +144,380 @@ Item {
         runTheme("toggle")
     }
 
+    // ── Theme file editing ────────────────────────────────────────────
+    readonly property string themesDir: Quickshell.env("HOME") + "/.config/43pr/themes"
+
+    function themePath(id) {
+        return page.themesDir + "/" + id + ".toml"
+    }
+
+    function groupOf(key) {
+        if (key.indexOf("term") === 0) return "TERMINAL"
+        if (key.indexOf("lock_") === 0) return "LOCK SCREEN"
+        if (key.indexOf("gtk_") === 0) return "GTK"
+        if (key.indexOf("qs_") === 0) return "QUICKSHELL"
+        if (key === "cursor" || key === "cursor_text" || key === "url"
+                || key.indexOf("selection_") === 0) return "CURSOR / SELECTION"
+        return "INTERFACE"
+    }
+
+    function isHex(s) {
+        return /^#[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(s)
+    }
+
+    function parseTheme(text) {
+        colorModel.clear()
+        var sec = ""
+        var lastGrp = ""
+        var lines = text.split("\n")
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i]
+            var sm = line.match(/^\s*\[([^\]]+)\]/)
+            if (sm) { sec = sm[1]; continue }
+
+            if (sec === "") {
+                var om = line.match(/^\s*override\s*=\s*(true|false)/)
+                if (om) page.editOverride = (om[1] === "true")
+                continue
+            }
+            if (sec !== "colors") continue
+
+            var km = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*"(#[0-9a-fA-F]{6,8})"/)
+            if (km) {
+                var g = groupOf(km[1])
+                // a header entry starts each group so it can span the full width of the grid
+                if (g !== lastGrp) {
+                    colorModel.append({ key: "", value: "#000000", grp: g, hdr: true })
+                    lastGrp = g
+                }
+                colorModel.append({ key: km[1], value: km[2].toLowerCase(), grp: g, hdr: false })
+            }
+        }
+    }
+
+    // [colors] table of a toml text -> { key: "#rrggbb", ... }
+    function colorsFromText(text) {
+        var v = {}
+        var sec = ""
+        var lines = text.split("\n")
+        for (var i = 0; i < lines.length; i++) {
+            var sm = lines[i].match(/^\s*\[([^\]]+)\]/)
+            if (sm) { sec = sm[1]; continue }
+            if (sec !== "colors") continue
+            var km = lines[i].match(/^\s*([A-Za-z0-9_]+)\s*=\s*"(#[0-9a-fA-F]{6,8})"/)
+            if (km) v[km[1]] = km[2].toLowerCase()
+        }
+        return v
+    }
+
+    // Preview palette array from a { key: hex } map. base = fallback palette.
+    function paletteFromValues(v, base) {
+        if (!v.bg) return null
+        return [v.bg, v.bg_track || base[1], v.fg || base[2], v.fg_faint || base[3],
+                v.accent || base[4], v.qs_accent2 || v.highlight || base[5]]
+    }
+
+    function openEditor(id) {
+        page.loadError = ""
+        page.confirmDelete = false
+        page.editId = id
+        page.editing = true
+        themeFile.path = ""
+        themeFile.path = themePath(id)
+        themeFile.reload()
+        flick.contentY = 0
+    }
+
+    function closeEditor() {
+        page.editing = false
+        page.loadError = ""
+        page.confirmDelete = false
+        page.searchFocusReleased()
+    }
+
+    // ── Delete a custom theme (two-step: click, then confirm) ─────────
+    function requestDelete() {
+        if (!page.editIsCustom || deleter.running) return
+        if (!page.confirmDelete) {
+            page.confirmDelete = true
+            confirmTimer.restart()
+            return
+        }
+        confirmTimer.stop()
+        page.confirmDelete = false
+        deleter.delId = page.editId
+        // $1 = file path (no shell interpolation of the name)
+        deleter.command = [
+            "/bin/sh", "-c",
+            "rm -f -- \"$1\"",
+            "sh", page.themePath(page.editId)
+        ]
+        deleter.running = true
+    }
+
+    // the confirmation expires if you don't click again
+    Timer {
+        id: confirmTimer
+        interval: 3000
+        onTriggered: page.confirmDelete = false
+    }
+
+    Process {
+        id: deleter
+        property string delId: ""
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode === 0) {
+                var o = page.palOverrides
+                delete o[delId]
+                page.palOverrides = o
+                page.palRev++
+
+                // if the deleted theme was the active one, fall back to the default theme
+                if (page.activeId === delId) {
+                    page.activeId = "default"
+                    page.runTheme("default")
+                }
+
+                page.editing = false
+                page.loadError = ""
+                page.scanThemes()
+                page.searchFocusReleased()
+            } else {
+                page.loadError = "Delete failed (exit code " + exitCode + ")."
+            }
+        }
+    }
+
+    function setColor(key, hex) {
+        if (!isHex(hex)) return
+        for (var i = 0; i < colorModel.count; i++) {
+            if (colorModel.get(i).key === key) {
+                colorModel.setProperty(i, "value", hex.toLowerCase())
+                return
+            }
+        }
+    }
+
+    function pickColor(key, current) {
+        page.pickingKey = key
+        if (page.pickerCommand.length > 0) {
+            picker.command = page.pickerCommand
+            picker.running = true
+        } else {
+            page.colorPickRequested(key, current)
+        }
+    }
+
+    // Tab / Shift+Tab between hex input fields (dir = +1 next, -1 previous).
+    function focusHex(from, dir) {
+        var n = colorRepeater.count
+        if (n === 0) return
+        var i = from
+        var item = null
+        for (var s = 0; s < n; s++) {               // skip group-header entries
+            i = ((i + dir) % n + n) % n             // wraps around at both ends
+            var cand = colorRepeater.itemAt(i)
+            if (cand && !cand.hdr) { item = cand; break }
+        }
+        if (!item) return
+
+        // forceActiveFocus makes the old field emit editingFinished, which would
+        // normally hand focus back to the window. The flag suppresses that.
+        page.hexTabbing = true
+        item.hexField.forceActiveFocus()
+        item.hexField.selectAll()
+        page.hexTabbing = false
+
+        // scroll the focused row into view
+        var y = item.mapToItem(flick.contentItem, 0, 0).y
+        if (y < flick.contentY)
+            flick.contentY = y
+        else if (y + item.height > flick.contentY + flick.height)
+            flick.contentY = Math.min(y + item.height - flick.height,
+                                      flick.contentHeight - flick.height)
+    }
+
+    Process {
+        id: picker
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var out = text.trim()
+                if (page.isHex(out)) page.setColor(page.pickingKey, out)
+            }
+        }
+    }
+
+    function buildText() {
+        var vals = {}
+        for (var i = 0; i < colorModel.count; i++) {
+            var e = colorModel.get(i)
+            vals[e.key] = e.value
+        }
+        var sec = ""
+        var lines = page.editText.split("\n")
+        for (var j = 0; j < lines.length; j++) {
+            var line = lines[j]
+            var sm = line.match(/^\s*\[([^\]]+)\]/)
+            if (sm) { sec = sm[1]; continue }
+
+            if (sec === "") {
+                lines[j] = line.replace(/^(\s*override\s*=\s*)(true|false)/,
+                                        "$1" + (page.editOverride ? "true" : "false"))
+            } else if (sec === "colors") {
+                var km = line.match(/^(\s*)([A-Za-z0-9_]+)(\s*=\s*)"#[0-9a-fA-F]{6,8}"(.*)$/)
+                if (km && vals[km[2]] !== undefined)
+                    lines[j] = km[1] + km[2] + km[3] + "\"" + vals[km[2]] + "\"" + km[4]
+            }
+        }
+        return lines.join("\n")
+    }
+
+    function updatePreview(id) {
+        var v = {}
+        for (var i = 0; i < colorModel.count; i++) {
+            var e = colorModel.get(i)
+            v[e.key] = e.value
+        }
+        var arr = paletteFromValues(v, page.palettes[id] || page.palettes["default"])
+        if (!arr) return
+        var o = page.palOverrides
+        o[id] = arr
+        page.palOverrides = o
+        page.palRev++
+    }
+
+    function saveAndApply() {
+        themeFile.setText(buildText())
+        updatePreview(page.editId)
+        applyTimer.restart()
+    }
+
+    Timer {
+        id: applyTimer
+        interval: 250
+        onTriggered: {
+            page.activeId = page.editId
+            // the monochrome theme is applied with the bare "default" command
+            page.runTheme(page.editId === "default" ? "default" : "preset " + page.editId)
+            page.editing = false
+            page.searchFocusReleased()
+        }
+    }
+
+    FileView {
+        id: themeFile
+        path: ""
+        onLoaded: {
+            page.editText = themeFile.text()
+            page.parseTheme(page.editText)
+            if (colorModel.count === 0)
+                page.loadError = "No [colors] entries found in this theme file."
+        }
+        onLoadFailed: page.loadError = "Could not read " + page.themePath(page.editId)
+    }
+
+    // ── Custom themes: duplicate the active theme under a new name ────
+    function themeLabel(id) {
+        return id === "default" ? "MONOCHROME" : id.replace(/[-_]+/g, " ").toUpperCase()
+    }
+
+    function openNaming() {
+        page.createMsg = ""
+        page.naming = true
+        nameInput.text = ""
+        nameInput.forceActiveFocus()
+    }
+
+    function closeNaming() {
+        page.naming = false
+        page.createMsg = ""
+        page.searchFocusReleased()
+    }
+
+    function createTheme(rawName) {
+        if (copier.running) return
+        var id = rawName.trim().toLowerCase()
+                        .replace(/[^a-z0-9_-]+/g, "-")
+                        .replace(/^-+|-+$/g, "")
+        if (id === "") {
+            page.createMsg = "Enter a name (letters, numbers, - and _)."
+            return
+        }
+        if (id === "default" || page.palettes[id] !== undefined) {
+            page.createMsg = "\"" + id + "\" is a built-in theme name. Pick another."
+            return
+        }
+        copier.newId = id
+        // args after the script: $1 = source, $2 = destination (no shell interpolation of the name)
+        copier.command = [
+            "/bin/sh", "-c",
+            "[ -f \"$1\" ] || exit 3; [ -e \"$2\" ] && exit 2; cp -- \"$1\" \"$2\"",
+            "sh", page.themePath(page.activeId), page.themePath(id)
+        ]
+        copier.running = true
+    }
+
+    Process {
+        id: copier
+        property string newId: ""
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode === 0) {
+                page.createMsg = ""
+                page.naming = false
+                page.scanThemes()
+                page.searchFocusReleased()
+            } else if (exitCode === 2) {
+                page.createMsg = "A theme named \"" + newId + "\" already exists."
+            } else if (exitCode === 3) {
+                page.createMsg = "No toml file found for \"" + page.activeId + "\" to copy."
+            } else {
+                page.createMsg = "Copy failed (exit code " + exitCode + ")."
+            }
+        }
+    }
+
+    // One shell call lists every *.toml in the themes dir and prints each as
+    //   @@<id>\n<file contents>
+    // so custom themes get their own buttons AND their real preview colors.
+    function scanThemes() {
+        if (scanner.running) return
+        scanner.running = true
+    }
+
+    function parseScan(text) {
+        var parts = text.split("@@")
+        var o = page.palOverrides
+        customModel.clear()
+        for (var i = 1; i < parts.length; i++) {
+            var nl = parts[i].indexOf("\n")
+            if (nl < 0) continue
+            var id = parts[i].substring(0, nl).trim()
+            if (id === "" || id === "default" || page.palettes[id] !== undefined)
+                continue
+            var arr = paletteFromValues(colorsFromText(parts[i].substring(nl + 1)),
+                                        page.palettes["default"])
+            if (arr) o[id] = arr
+            customModel.append({ tid: id })
+        }
+        page.palOverrides = o
+        page.palRev++
+    }
+
+    Process {
+        id: scanner
+        command: [
+            "/bin/sh", "-c",
+            "for f in \"$1\"/*.toml; do [ -f \"$f\" ] || continue; "
+            + "printf '@@%s\\n' \"$(basename \"$f\" .toml)\"; cat \"$f\"; printf '\\n'; done",
+            "sh", page.themesDir
+        ]
+        stdout: StdioCollector {
+            onStreamFinished: page.parseScan(text)
+        }
+    }
+
+    Component.onCompleted: page.scanThemes()
+
     component ToggleButton: Rectangle {
         required property string label
         required property bool checked
@@ -76,11 +525,14 @@ Item {
         signal toggled()
 
         width: parent.width
-        height: 42
+        height: page.buttonHeight
         radius: Theme.radius
-        color: "#00000000"
+        color: hover.containsMouse ? Theme.alpha(Theme.accent, 0.08) : "#00000000"
         border.width: 1
-        border.color: checked ? Theme.accent : Theme.border
+        border.color: (checked || hover.containsMouse) ? Theme.accent : Theme.border
+
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on border.color { ColorAnimation { duration: 120 } }
 
         Text {
             anchors.fill: parent
@@ -89,7 +541,7 @@ Item {
             text: label + ": " + valueText
             color: checked ? Theme.accent : Theme.textDim
             font.family: Theme.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Theme.textSizeBody
             font.bold: true
             font.letterSpacing: 1
             horizontalAlignment: Text.AlignHCenter
@@ -100,108 +552,38 @@ Item {
         }
 
         MouseArea {
+            id: hover
             anchors.fill: parent
             hoverEnabled: true
-
-            onEntered: {
-                parent.color = Theme.alpha(Theme.accent, 0.08)
-                parent.border.color = Theme.accent
-            }
-
-            onExited: {
-                parent.color = "#00000000"
-                parent.border.color = parent.checked ? Theme.accent : Theme.border
-            }
-
+            cursorShape: Qt.PointingHandCursor
             onClicked: parent.toggled()
         }
     }
 
-    component ConfigButton: Rectangle {
+    // Plain action button (SAVE, CANCEL, EDIT ...)
+    component ActionButton: Rectangle {
         required property string label
-        required property string path
+        property bool primary: false
+        signal clicked()
 
-        width: parent.width
-        height: 42
+        height: page.buttonHeight
         radius: Theme.radius
-        color: "#00000000"
+        color: primary ? Theme.alpha(Theme.accent, ma.containsMouse ? 0.30 : 0.18)
+                       : (ma.containsMouse ? Theme.alpha(Theme.accent, 0.08) : "#00000000")
         border.width: 1
-        border.color: Theme.border
+        border.color: (primary || ma.containsMouse) ? Theme.accent : Theme.border
 
-        Text {
-            anchors.left: parent.left
-            anchors.leftMargin: 14
-            anchors.verticalCenter: parent.verticalCenter
-            text: label
-            color: Theme.textDim
-            font.family: Theme.fontFamily
-            font.pixelSize: 13
-            font.bold: true
-            font.letterSpacing: 2
-        }
+        Behavior on color { ColorAnimation { duration: 120 } }
 
-        Row {
-            anchors.right: parent.right
-            anchors.rightMargin: 14
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: 8
-
-            Text {
-                text: "\uf120"
-                color: Theme.textDim
-                font.family: Theme.iconFont
-                font.pixelSize: 13
-                anchors.verticalCenter: parent.verticalCenter
-            }
-
-            Text {
-                text: "EDIT " + path.split("/").pop().toUpperCase()
-                color: Theme.textDim
-                font.family: Theme.fontFamily
-                font.pixelSize: 12
-                font.bold: true
-                font.letterSpacing: 1
-                anchors.verticalCenter: parent.verticalCenter
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-
-            onEntered: {
-                parent.color = Theme.alpha(Theme.accent, 0.08)
-                parent.border.color = Theme.accent
-            }
-
-            onExited: {
-                parent.color = "#00000000"
-                parent.border.color = Theme.border
-            }
-
-            onClicked: page.editConfig(path)
-        }
-    }
-
-    component ThemeButton: Rectangle {
-        required property string label
-        required property string command
-
-        width: (parent.width - (parent.columns - 1) * parent.spacing) / parent.columns
-        height: 42
-        radius: Theme.radius
-        color: "#00000000"
-        border.width: 1
-        border.color: Theme.border
-
+        // wraps / elides so long labels still fit in a narrow (4-column) button
         Text {
             anchors.fill: parent
             anchors.leftMargin: 6
             anchors.rightMargin: 6
             text: label
-            color: Theme.textDim
+            color: (primary || ma.containsMouse) ? Theme.accent : Theme.textDim
             font.family: Theme.fontFamily
-            font.pixelSize: 11
+            font.pixelSize: Theme.textSizeBody
             font.bold: true
             font.letterSpacing: 1
             horizontalAlignment: Text.AlignHCenter
@@ -212,20 +594,150 @@ Item {
         }
 
         MouseArea {
+            id: ma
             anchors.fill: parent
             hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: parent.clicked()
+        }
+    }
 
-            onEntered: {
-                parent.color = Theme.alpha(Theme.accent, 0.08)
-                parent.border.color = Theme.accent
+    // Theme button: mini "window" painted in the preset's own colors,
+    // palette swatches underneath, label, and an active marker.
+    component ThemeButton: Rectangle {
+        id: btn
+        required property string label
+        required property string command
+        property string pid: command.indexOf("preset ") === 0 ? command.substring(7) : "default"
+
+        readonly property var p: page.pal(pid)
+        readonly property bool active: page.activeId === pid
+        readonly property bool hovered: mouse.containsMouse
+
+        width: parent && parent.columns
+        ? (parent.width - (parent.columns - 1) * parent.spacing) / parent.columns
+        : 0
+        height: 78
+        radius: Theme.radius
+        color: hovered ? Theme.alpha(Theme.accent, 0.08) : "#00000000"
+        border.width: active ? 2 : 1
+        border.color: (active || hovered) ? Theme.accent : Theme.border
+
+        scale: hovered ? 1.02 : 1.0
+        Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+        Behavior on color { ColorAnimation { duration: 120 } }
+        Behavior on border.color { ColorAnimation { duration: 120 } }
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 6
+            spacing: 5
+
+            // mini window
+            Rectangle {
+                width: parent.width
+                height: 34
+                radius: 3
+                color: btn.p.bg
+                border.width: 1
+                border.color: Theme.alpha(btn.p.muted, 0.5)
+
+                // title bar
+                Rectangle {
+                    x: 0; y: 0
+                    width: parent.width
+                    height: 8
+                    radius: 3
+                    color: btn.p.surface
+                }
+                Row {
+                    x: 4; y: 2
+                    spacing: 2
+                    Repeater {
+                        model: 3
+                        Rectangle { width: 4; height: 4; radius: 2; color: index === 0 ? btn.p.accent : btn.p.muted }
+                    }
+                }
+                // fake text lines
+                Rectangle { x: 6; y: 13; width: parent.width * 0.55; height: 3; radius: 1; color: btn.p.fg }
+                Rectangle { x: 6; y: 19; width: parent.width * 0.35; height: 3; radius: 1; color: btn.p.muted }
+                // fake accent button
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 5
+                    width: parent.width * 0.28
+                    height: 8
+                    radius: 2
+                    color: btn.p.accent
+                }
+                Rectangle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.top: parent.top
+                    anchors.topMargin: 13
+                    width: 8; height: 8; radius: 4
+                    color: btn.p.accent2
+                }
             }
 
-            onExited: {
-                parent.color = "#00000000"
-                parent.border.color = Theme.border
+            // swatch strip
+            Row {
+                width: parent.width
+                height: 6
+                spacing: 2
+                Repeater {
+                    model: [btn.p.bg, btn.p.surface, btn.p.muted, btn.p.fg, btn.p.accent2, btn.p.accent]
+                    Rectangle {
+                        width: (parent.width - 5 * parent.spacing) / 6
+                        height: 6
+                        radius: 1
+                        color: modelData
+                        border.width: 1
+                        border.color: Theme.alpha(Theme.textDim, 0.25)
+                    }
+                }
             }
 
-            onClicked: page.runTheme(command)
+            // label + active dot
+            Item {
+                width: parent.width
+                height: 12
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.right: dot.left
+                    anchors.rightMargin: 4
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: btn.label
+                    color: (btn.active || btn.hovered) ? Theme.accent : Theme.textDim
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSizeSmall
+                    font.bold: true
+                    font.letterSpacing: 1
+                    elide: Text.ElideRight
+                }
+                Rectangle {
+                    id: dot
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 6; height: 6; radius: 3
+                    color: Theme.accent
+                    visible: btn.active
+                }
+            }
+        }
+
+        MouseArea {
+            id: mouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                page.activeId = btn.pid      // optimistic
+                page.runTheme(btn.command)
+            }
         }
     }
 
@@ -264,10 +776,12 @@ Item {
             spacing: 14
 
             Text {
-                text: "THEMES"
+                text: page.editing
+                      ? ("EDIT: " + (page.editId === "default" ? "MONOCHROME" : page.editId.toUpperCase()))
+                      : "THEMES"
                 color: Theme.text
                 font.family: Theme.fontFamily
-                font.pixelSize: 19
+                font.pixelSize: Theme.textSizeTitle
                 font.letterSpacing: 3
             }
 
@@ -277,27 +791,127 @@ Item {
                 color: Theme.border
             }
 
+            // ───────────────────── BROWSE VIEW ─────────────────────
             Column {
                 width: parent.width
                 spacing: page.sectionSpacing
+                visible: !page.editing
 
+                // Top row: 4 equal columns
                 Row {
+                    id: topRow
                     width: parent.width
                     spacing: page.sectionSpacing
+                    readonly property real cellW: (width - 3 * spacing) / 4
 
                     ToggleButton {
-                        width: (parent.width - parent.spacing) / 2
+                        width: topRow.cellW
                         label: "COLOR GENERATION"
                         checked: page.colorGen
                         onToggled: page.setColorGen(!page.colorGen)
                     }
 
                     ToggleButton {
-                        width: (parent.width - parent.spacing) / 2
+                        width: topRow.cellW
                         label: "MODE"
                         checked: true
                         valueText: page.darkMode ? "DARK" : "LIGHT"
                         onToggled: page.toggleMode()
+                    }
+
+                    // Edit the currently active preset (the default theme has no toml)
+                    ActionButton {
+                        width: topRow.cellW
+                        label: "CUSTOMIZE: " + page.themeLabel(page.activeId)
+                        onClicked: page.openEditor(page.activeId)
+                    }
+
+                    // Duplicate the active theme's toml under a new name
+                    ActionButton {
+                        width: topRow.cellW
+                        label: "NEW THEME"
+                        primary: page.naming
+                        onClicked: page.naming ? page.closeNaming() : page.openNaming()
+                    }
+                }
+
+                // Name prompt for NEW THEME
+                Column {
+                    width: parent.width
+                    spacing: 4
+                    visible: page.naming
+
+                    Text {
+                        text: "COPY OF " + page.themeLabel(page.activeId) + " AS:"
+                        color: Theme.textDim
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSizeSmall
+                        font.bold: true
+                        font.letterSpacing: 2
+                    }
+
+                    Row {
+                        id: nameRow
+                        width: parent.width
+                        spacing: page.sectionSpacing
+
+                        Rectangle {
+                            width: nameRow.width - 2 * (topRow.cellW + nameRow.spacing)
+                            height: page.buttonHeight
+                            radius: Theme.radius
+                            color: "#00000000"
+                            border.width: 1
+                            border.color: nameInput.activeFocus ? Theme.accent : Theme.border
+
+                            TextInput {
+                                id: nameInput
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: Theme.text
+                                selectByMouse: true
+                                maximumLength: 40
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textSizeBody
+                                onAccepted: page.createTheme(text)
+                                onTextChanged: if (page.createMsg !== "") page.createMsg = ""
+
+                                Keys.onEscapePressed: page.closeNaming()
+
+                                Text {
+                                    anchors.fill: parent
+                                    verticalAlignment: Text.AlignVCenter
+                                    visible: nameInput.text === "" && !nameInput.preeditText
+                                    text: "theme name"
+                                    color: Theme.alpha(Theme.textDim, 0.5)
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textSizeBody
+                                }
+                            }
+                        }
+
+                        ActionButton {
+                            width: topRow.cellW
+                            label: "CREATE"
+                            primary: true
+                            onClicked: page.createTheme(nameInput.text)
+                        }
+                        ActionButton {
+                            width: topRow.cellW
+                            label: "CANCEL"
+                            onClicked: page.closeNaming()
+                        }
+                    }
+
+                    Text {
+                        visible: page.createMsg !== ""
+                        width: parent.width
+                        text: page.createMsg
+                        color: "#ff5555"
+                        font.family: Theme.fontFamily
+                        font.pixelSize: Theme.textSizeBody
+                        wrapMode: Text.WordWrap
                     }
                 }
 
@@ -306,88 +920,240 @@ Item {
                     columns: 3
                     spacing: page.sectionSpacing
 
-                    ThemeButton {
-                        label: "DEFAULT"
-                        command: "default"
-                    }
-                    ThemeButton {
-                        label: "WHITE"
-                        command: "preset white"
-                    }
-                    ThemeButton {
-                        label: "METAL"
-                        command: "preset metal"
-                    }
-                    ThemeButton {
-                        label: "SLATE"
-                        command: "preset slate"
-                    }
-                    ThemeButton {
-                        label: "LIGHT GRAY"
-                        command: "preset light-gray"
-                    }
-                    ThemeButton {
-                        label: "BEIGE"
-                        command: "preset beige"
-                    }
-                    ThemeButton {
-                        label: "SILVER"
-                        command: "preset silver"
-                    }
-                    ThemeButton {
-                        label: "GOLD"
-                        command: "preset gold"
-                    }
-                    ThemeButton {
-                        label: "NORD"
-                        command: "preset nord"
-                    }
-                    ThemeButton {
-                        label: "TOKYO NIGHT"
-                        command: "preset tokyo-night"
-                    }
-                    ThemeButton {
-                        label: "CATPPUCCIN MOCHA"
-                        command: "preset catppuccin-mocha"
-                    }
-                    ThemeButton {
-                        label: "EVERFOREST DARK"
-                        command: "preset everforest-dark"
-                    }
-                    ThemeButton {
-                        label: "DRACULA"
-                        command: "preset dracula"
-                    }
-                    ThemeButton {
-                        label: "ONE DARK"
-                        command: "preset one-dark"
-                    }
-                    ThemeButton {
-                        label: "KANAGAWA"
-                        command: "preset kanagawa"
-                    }
-                    ThemeButton {
-                        label: "ROSE PINE"
-                        command: "preset rose-pine"
-                    }
-                    ThemeButton {
-                        label: "RED"
-                        command: "preset red"
-                    }
-                    ThemeButton {
-                        label: "MATRIX"
-                        command: "preset matrix"
+                    ThemeButton { label: "MONOCHROME"; command: "default" }
+                    ThemeButton { label: "SLATE"; command: "preset slate" }
+                    ThemeButton { label: "GRAPHITE"; command: "preset graphite" }
+                    ThemeButton { label: "NORD"; command: "preset nord" }
+                    ThemeButton { label: "ARCTIC"; command: "preset arctic" }
+                    ThemeButton { label: "METAL"; command: "preset metal" }
+                    ThemeButton { label: "CATPPUCCIN MOCHA"; command: "preset catppuccin-mocha" }
+                    ThemeButton { label: "TOKYO NIGHT"; command: "preset tokyo-night" }
+                    ThemeButton { label: "KANAGAWA"; command: "preset kanagawa" }
+                    ThemeButton { label: "ONE DARK"; command: "preset one-dark" }
+                    ThemeButton { label: "DRACULA"; command: "preset dracula" }
+                    ThemeButton { label: "ROSE PINE"; command: "preset rose-pine" }
+                    ThemeButton { label: "EVERFOREST DARK"; command: "preset everforest-dark" }
+                    ThemeButton { label: "MOSS"; command: "preset moss" }
+                    ThemeButton { label: "GOLD"; command: "preset gold" }
+                    ThemeButton { label: "CYAN"; command: "preset cyan" }
+                    ThemeButton { label: "MATRIX"; command: "preset matrix" }
+                    ThemeButton { label: "RED"; command: "preset red" }
+                    ThemeButton { label: "GRUVBOX DARK"; command: "preset gruvbox-dark" }
+                    ThemeButton { label: "SOLARIZED DARK"; command: "preset solarized-dark" }
+                    ThemeButton { label: "MONOKAI"; command: "preset monokai" }
+                    ThemeButton { label: "SILVER"; command: "preset silver" }
+                    ThemeButton { label: "LIGHT GRAY"; command: "preset light-gray" }
+                    ThemeButton { label: "BEIGE"; command: "preset beige" }
+                    ThemeButton { label: "CATPPUCCIN LATTE"; command: "preset catppuccin-latte" }
+                    ThemeButton { label: "SOLARIZED LIGHT"; command: "preset solarized-light" }
+                    ThemeButton { label: "GRUVBOX LIGHT"; command: "preset gruvbox-light" }
+
+                    // user-created themes (one button per extra .toml in the themes dir)
+                    Repeater {
+                        model: customModel
+                        delegate: ThemeButton {
+                            required property string tid
+                            label: page.themeLabel(tid)
+                            command: "preset " + tid
+                        }
                     }
                 }
             }
 
+            // ───────────────────── EDIT VIEW ───────────────────────
             Column {
                 width: parent.width
                 spacing: page.sectionSpacing
+                visible: page.editing
 
-                ConfigButton {
-                    label: "THEME"
-                    path: "~/.config/quickshell/Theme.qml"
+                Row {
+                    id: editBtnRow
+                    width: parent.width
+                    spacing: page.sectionSpacing
+                    // 4 buttons for custom themes (with DELETE), 3 otherwise
+                    readonly property int btnCount: page.editIsCustom ? 4 : 3
+                    readonly property real cellW: (width - (btnCount - 1) * spacing) / btnCount
+
+                    ActionButton {
+                        width: editBtnRow.cellW
+                        label: "CANCEL"
+                        onClicked: page.closeEditor()
+                    }
+                    ActionButton {
+                        width: editBtnRow.cellW
+                        label: "SAVE + APPLY"
+                        primary: true
+                        enabled: colorModel.count > 0
+                        onClicked: page.saveAndApply()
+                    }
+                    ActionButton {
+                        width: editBtnRow.cellW
+                        label: "RELOAD FILE"
+                        onClicked: { page.loadError = ""; page.confirmDelete = false; themeFile.reload() }
+                    }
+                    // Only for user-created themes; click twice to confirm
+                    ActionButton {
+                        width: editBtnRow.cellW
+                        visible: page.editIsCustom
+                        label: page.confirmDelete ? "CONFIRM DELETE?" : "DELETE"
+                        primary: page.confirmDelete
+                        onClicked: page.requestDelete()
+                    }
+                }
+
+                ToggleButton {
+                    width: parent.width
+                    label: "KEEP ON WALLPAPER CHANGE (override)"
+                    checked: page.editOverride
+                    onToggled: page.editOverride = !page.editOverride
+                }
+
+                Text {
+                    visible: page.loadError !== ""
+                    width: parent.width
+                    text: page.loadError
+                    color: Theme.accent
+                    font.family: Theme.fontFamily
+                    font.pixelSize: Theme.textSizeBody
+                    wrapMode: Text.WordWrap
+                }
+
+                // 3-column grid of colors; group headers span the full width
+                Flow {
+                    id: colorFlow
+                    width: parent.width
+                    spacing: page.sectionSpacing
+                    readonly property real cellW: Math.floor((width - 2 * spacing) / 3)
+
+                    Repeater {
+                        id: colorRepeater
+                        model: colorModel
+
+                        delegate: Item {
+                            id: row
+                            property alias hexField: hexInput
+                            required property int index
+                            required property string key
+                            required property string value
+                            required property string grp
+                            required property bool hdr
+
+                            width: hdr ? colorFlow.width : colorFlow.cellW
+                            height: hdr ? groupLabel.implicitHeight + 8 : 58
+
+                            Text {
+                                id: groupLabel
+                                visible: row.hdr
+                                anchors.fill: parent
+                                verticalAlignment: Text.AlignBottom
+                                text: row.grp
+                                color: Theme.textDim
+                                font.family: Theme.fontFamily
+                                font.pixelSize: Theme.textSizeSmall
+                                font.bold: true
+                                font.letterSpacing: 2
+                            }
+
+                            Rectangle {
+                                visible: !row.hdr
+                                anchors.fill: parent
+                                radius: Theme.radius
+                                color: rowHover.containsMouse ? Theme.alpha(Theme.accent, 0.08) : "#00000000"
+                                border.width: 1
+                                border.color: rowHover.containsMouse ? Theme.accent : Theme.border
+
+                                MouseArea {
+                                    id: rowHover
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    acceptedButtons: Qt.NoButton
+                                }
+
+                                // key name on top
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 8
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    anchors.top: parent.top
+                                    anchors.topMargin: 6
+                                    text: row.key
+                                    color: Theme.text
+                                    font.family: Theme.fontFamily
+                                    font.pixelSize: Theme.textSizeBody
+                                    elide: Text.ElideRight
+                                }
+
+                                // swatch -> opens the color picker
+                                Rectangle {
+                                    id: swatch
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 8
+                                    anchors.bottom: parent.bottom
+                                    anchors.bottomMargin: 7
+                                    width: 36; height: 22
+                                    radius: 3
+                                    color: row.value
+                                    border.width: 1
+                                    border.color: Theme.alpha(Theme.textDim, 0.4)
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: page.pickColor(row.key, row.value)
+                                    }
+                                }
+
+                                // manual hex entry
+                                Rectangle {
+                                    id: hexBox
+                                    anchors.left: swatch.right
+                                    anchors.leftMargin: 8
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    anchors.verticalCenter: swatch.verticalCenter
+                                    height: 24
+                                    radius: 3
+                                    color: "#00000000"
+                                    border.width: 1
+                                    border.color: hexInput.activeFocus
+                                                  ? Theme.accent
+                                                  : (page.isHex(hexInput.text) ? Theme.border : "#ff5555")
+
+                                    TextInput {
+                                        id: hexInput
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 6
+                                        anchors.rightMargin: 6
+                                        verticalAlignment: TextInput.AlignVCenter
+                                        text: row.value
+                                        color: Theme.textDim
+                                        selectByMouse: true
+                                        maximumLength: 9
+                                        font.family: Theme.fontFamily
+                                        font.pixelSize: Theme.textSizeBody
+                                        onEditingFinished: {
+                                            if (page.isHex(text)) page.setColor(row.key, text)
+                                            else text = row.value
+                                            // don't hand focus back to the window while tabbing
+                                            if (!page.hexTabbing)
+                                                page.searchFocusReleased()
+                                        }
+
+                                        // Tab / Shift+Tab: next / previous hex field
+                                        Keys.onTabPressed: page.focusHex(row.index, 1)
+                                        Keys.onBacktabPressed: page.focusHex(row.index, -1)
+
+                                        // Esc: drop the edit and give focus back to the window
+                                        Keys.onEscapePressed: {
+                                            text = row.value
+                                            page.searchFocusReleased()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

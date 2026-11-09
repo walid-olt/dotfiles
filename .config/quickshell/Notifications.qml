@@ -13,10 +13,11 @@ Scope {
     property int topGap: 50
     property int sideGap: 16
     property int edgeGap: 0
-    property int baseWidth: 300
+    property int baseWidth: 340
     property int maxHistory: 100
 
     property bool dnd: false
+    property bool soundEnabled: true
     property bool panelOpen: false
     property bool stateReady: false
     property bool dirsReady: false
@@ -24,12 +25,54 @@ Scope {
     property bool dragging: false
     property real offsetX: 0
     property real offsetY: 0
-    property int menuSize: 100
+    property int menuSize: 100        // COMPONENT scale (%): panel, spacing, text
+    property int textSize: 100        // TEXT size (%): fonts only, on top of the component scale
     readonly property real ui: menuSize / 100
+    readonly property real tx: textSize / 100
     readonly property int cardWidth: Math.round(baseWidth * ui)
     readonly property bool movedFromDefault: offsetX !== 0 || offsetY !== 0
 
+    // wheel accumulators so touchpads / smooth wheels step once per notch
+    property real wheelAccText: 0
+    property real wheelAccScale: 0
+
     readonly property string home: Quickshell.env("HOME")
+
+    // toast lifetimes (ms) when the app gives no timeout
+    readonly property int normalTimeout: 3000
+    readonly property int criticalTimeout: 6000
+
+    // grouping state (collapsed groups are persisted, expanded entries are not)
+    property var collapsedApps: ({})
+    property var expandedSet: ({})
+    property int groupCount: 0
+    property bool allCollapsed: false
+
+    // an expanded group shows at most `groupLimit` entries at a time; the
+    // mouse wheel (or the pager arrows) scrolls through the rest
+
+    property int groupLimit: 3
+
+    property var groupOffsets: ({})
+    property bool animateRows: false
+    property int scrollDir: 1   // +1 = scrolling to older entries, -1 = to newer
+
+    // Do Not Disturb normally lets critical notifications through. Many chat
+    // apps (Discord and its clients) mark everything critical, so these apps
+    // are muted by DND regardless of urgency. Lowercase substrings of appName.
+    property var dndMuteCritical: ["discord", "vesktop", "webcord", "armcord"]
+    // must outlast the whole scroll transition (stagger + longest animation)
+    Timer { id: animTimer; interval: 800; onTriggered: root.animateRows = false }
+
+    // extra glyphs (Nerd Font / Material Design Icons, written as surrogate pairs)
+    readonly property string icDown: "\uDB80\uDD40"
+    readonly property string icRight: "\uDB80\uDD42"
+    readonly property string icUp: "\uDB80\uDD43"
+    readonly property string icCopy: "\uDB80\uDD8F"
+    readonly property string icCheck: "\uDB80\uDD2C"
+
+    signal rowsAboutToRebuild()
+    signal rowsRebuilt()
 
     // ---- lifecycle: window is mounted only when needed ---------------------
     readonly property bool wanted: panelOpen || server.trackedNotifications.values.length > 0
@@ -44,15 +87,25 @@ Scope {
         }
     }
 
-    // must outlast the longest fade (toast 200ms / panel 200ms)
+    // must outlast the longest animation (toast 380ms / panel 340ms)
     Timer {
         id: unmountTimer
-        interval: 260
+        interval: 440
         onTriggered: root.mounted = false
     }
 
+    // true only for a moment after the panel opens: rows created in that window
+    // play the staggered entry; rows created later (scrolling, rebuilds) don't
+    property bool opening: false
+    Timer { id: openingTimer; interval: 700; onTriggered: root.opening = false }
+
     onPanelOpenChanged: {
+        if (panelOpen) {
+            opening = true;
+            openingTimer.restart();
+        }
         if (!panelOpen) {
+            opening = false;
             dragging = false;
             // closing mid-drag never delivers a release event; persist anyway
             if (stateReady) stateTimer.restart();
@@ -62,11 +115,87 @@ Scope {
     // ---- helpers (no window dependencies) ----------------------------------
     function px(n) { return Math.round(n * ui); }
     function imgSrc(p) { return !p ? "" : (p.startsWith("/") ? "file://" + p : p); }
-    function thumbSrc(image, icon) {
-        if (image && image !== "") return imgSrc(image);
-        if (icon && icon !== "") return Quickshell.iconPath(icon, true);
+    function canExpand(body) { return body.length > 70 || body.indexOf("\n") >= 0; }
+    function groupKey(app) { return app && app !== "" ? app : "Other"; }
+
+    // component scale
+    function setSize(v) {
+        root.menuSize = Math.max(60, Math.min(200, Math.round(v)));
+        stateTimer.restart();
+    }
+
+    // text size
+    function setTextSize(v) {
+        root.textSize = Math.max(60, Math.min(200, Math.round(v)));
+        stateTimer.restart();
+    }
+
+    // Ctrl + wheel -> text size. One 5% step per 120 units of angleDelta (one wheel notch)
+    function wheelText(delta) {
+        root.wheelAccText += delta;
+        while (root.wheelAccText >= 120) {
+            root.wheelAccText -= 120;
+            root.setTextSize(root.textSize + 5);
+        }
+        while (root.wheelAccText <= -120) {
+            root.wheelAccText += 120;
+            root.setTextSize(root.textSize - 5);
+        }
+    }
+
+    // Shift + wheel -> component scale
+    function wheelScale(delta) {
+        root.wheelAccScale += delta;
+        while (root.wheelAccScale >= 120) {
+            root.wheelAccScale -= 120;
+            root.setSize(root.menuSize + 5);
+        }
+        while (root.wheelAccScale <= -120) {
+            root.wheelAccScale += 120;
+            root.setSize(root.menuSize - 5);
+        }
+    }
+
+    function guessKind(app, summary) {
+        const s = ((app || "") + " " + (summary || "")).toLowerCase();
+        if (/todo|remind/.test(s)) return "reminder";
+        if (/usb|disk|drive|device|mount|eject|removed|unplug|storage|udisks|udiskie/.test(s)) return "usb";
+        if (/batter/.test(s)) return "battery";
         return "";
     }
+    function resolveIcon(image, icon, app, summary) {
+        const kind = guessKind(app, summary);
+        if (kind === "reminder") return "";
+        if (image && image !== "" && !String(image).startsWith("image://icon"))
+            return imgSrc(image);
+        const cands = [];
+        if (icon && icon !== "") cands.push(icon);
+        if (app && app !== "") {
+            cands.push(app);
+            cands.push(app.toLowerCase());
+        }
+        if (kind === "usb")
+            cands.push("drive-removable-media-usb", "drive-removable-media", "media-removable", "usb-creator-gtk", "drive-harddisk-usb");
+        else if (kind === "battery")
+            cands.push("battery-caution", "battery");
+        cands.push("dialog-information");
+
+        for (let i = 0; i < cands.length; i++) {
+            const c = cands[i];
+            if (c.startsWith("/")) return "file://" + c;
+            if (c.startsWith("image://")) return c;
+            const p = String(Quickshell.iconPath(c, true) || "");
+            // reject empty results and the "missing icon" placeholder
+            if (p !== "" && p.indexOf("missing") === -1) return p;
+        }
+        return "";
+    }
+
+    // glyph shown when no icon could be resolved
+    function glyphFor(app, summary) {
+        return guessKind(app, summary) === "reminder" ? "󰂞" : "󰂚";
+    }
+
     function fmtTime(ms) {
         const d = new Date(ms);
         return d.toDateString() === new Date().toDateString()
@@ -74,13 +203,227 @@ Scope {
             : Qt.formatDateTime(d, "dd MMM HH:mm");
     }
     function copyText(s, b) { Quickshell.execDetached(["wl-copy", b !== "" ? s + "\n" + b : s]); }
-    function removeHistory(i) { history.remove(i); saveTimer.restart(); }
-    function clearHistory() { history.clear(); saveTimer.restart(); }
+    function copyRaw(s) { Quickshell.execDetached(["wl-copy", s]); }
+
     function toggleDnd() { dnd = !dnd; stateTimer.restart(); }
+    function toggleSound() { soundEnabled = !soundEnabled; stateTimer.restart(); }
     function resetPosition() {
         offsetX = 0;
         offsetY = 0;
         stateTimer.restart();
+    }
+
+    // ---- history actions ------------------------------------------------------
+    function removeHistory(i) {
+        if (i < 0 || i >= history.count) return;
+        history.remove(i);
+        saveTimer.restart();
+        scheduleRebuild();
+    }
+    function clearHistory() {
+        history.clear();
+        saveTimer.restart();
+        scheduleRebuild();
+    }
+    function removeGroup(name) {
+        for (let i = history.count - 1; i >= 0; i--)
+            if (groupKey(history.get(i).appName) === name) history.remove(i);
+        saveTimer.restart();
+        scheduleRebuild();
+    }
+
+    function toggleCollapse(name) {
+        const c = {};
+        for (const k in collapsedApps) c[k] = collapsedApps[k];
+        if (c[name]) delete c[name]; else c[name] = true;
+        collapsedApps = c;
+        stateTimer.restart();
+        scheduleRebuild();
+    }
+    function toggleCollapseAll() {
+        const c = {};
+        if (!allCollapsed) {
+            for (let i = 0; i < history.count; i++) c[groupKey(history.get(i).appName)] = true;
+        }
+        collapsedApps = c;
+        stateTimer.restart();
+        scheduleRebuild();
+    }
+    function groupSize(name) {
+        let n = 0;
+        for (let i = 0; i < history.count; i++)
+            if (groupKey(history.get(i).appName) === name) n++;
+        return n;
+    }
+    function makeItemRow(name, hi, total) {
+        const e = history.get(hi);
+        const key = e.time + "|" + e.summary;
+        return {
+            rowType: "item", groupName: name,
+            summary: e.summary, body: e.body, appName: e.appName,
+            appIcon: e.appIcon, image: e.image, time: e.time,
+            hIndex: hi, grpCount: total, collapsed: false,
+            expanded: expandedSet[key] === true, rowKey: key
+        };
+    }
+
+    // Scrolls a group's window by `delta` entries. Returns true if it moved.
+    // The model is patched in place (one row out, one row in) instead of being
+    // rebuilt, so the ListView transitions can animate the movement.
+    function scrollGroup(name, delta) {
+        const idxs = [];
+        for (let i = 0; i < history.count; i++)
+            if (groupKey(history.get(i).appName) === name) idxs.push(i);
+        const total = idxs.length;
+        const maxOff = Math.max(0, total - groupLimit);
+        const cur = Math.min(groupOffsets[name] || 0, maxOff);
+        const next = Math.max(0, Math.min(maxOff, cur + delta));
+        if (next === cur) return false;
+
+        const o = {};
+        for (const k in groupOffsets) o[k] = groupOffsets[k];
+        o[name] = next;
+        groupOffsets = o;
+
+        // fall back to a full rebuild whenever an in-place patch isn't safe
+        if (Math.abs(delta) !== 1 || rebuildTimer.running) { scheduleRebuild(); return true; }
+
+        let h = -1;
+        for (let i = 0; i < rows.count; i++) {
+            const r = rows.get(i);
+            if (r.rowType === "header" && r.groupName === name) { h = i; break; }
+        }
+        if (h < 0 || rows.get(h).collapsed) { scheduleRebuild(); return true; }
+
+        let pager = h + 1;
+        while (pager < rows.count && rows.get(pager).rowType === "item" && rows.get(pager).groupName === name) pager++;
+        if (pager >= rows.count || rows.get(pager).rowType !== "pager" || pager - h - 1 !== groupLimit) {
+            scheduleRebuild();
+            return true;
+        }
+
+        scrollDir = delta > 0 ? 1 : -1;
+        animateRows = true;
+        animTimer.restart();
+
+        if (delta > 0) {
+            rows.remove(h + 1);
+            rows.insert(pager - 1, makeItemRow(name, idxs[next + groupLimit - 1], total));
+        } else {
+            rows.remove(pager - 1);
+            rows.insert(h + 1, makeItemRow(name, idxs[next], total));
+        }
+        rows.setProperty(pager, "summary", (next + 1) + "–" + (next + groupLimit) + " of " + total);
+        rows.setProperty(pager, "hIndex", next);
+        return true;
+    }
+    function toggleExpand(rowIndex, key) {
+        const s = {};
+        for (const k in expandedSet) s[k] = expandedSet[k];
+        if (s[key]) delete s[key]; else s[key] = true;
+        expandedSet = s;
+        rows.setProperty(rowIndex, "expanded", s[key] === true);
+    }
+
+    // ---- grouped view model (rebuilt from history) -------------------------------
+    ListModel { id: rows }
+
+    Timer {
+        id: rebuildTimer
+        interval: 20
+        onTriggered: root.rebuildRows()
+    }
+    function scheduleRebuild() { rebuildTimer.restart(); }
+
+    function rebuildRows() {
+        rowsAboutToRebuild();
+        rows.clear();
+
+        const order = [];
+        const groups = {};
+        for (let i = 0; i < history.count; i++) {
+            const k = groupKey(history.get(i).appName);
+            if (!groups[k]) { groups[k] = []; order.push(k); }
+            groups[k].push(i);
+        }
+
+        let collapsedN = 0;
+        for (let g = 0; g < order.length; g++) {
+            const name = order[g];
+            const idxs = groups[name];
+            const first = history.get(idxs[0]);
+            const coll = collapsedApps[name] === true;
+            if (coll) collapsedN++;
+
+            rows.append({
+                rowType: "header", groupName: name,
+                summary: first.summary, body: "", appName: first.appName,
+                appIcon: first.appIcon, image: "", time: first.time,
+                hIndex: -1, grpCount: idxs.length, collapsed: coll,
+                expanded: false, rowKey: ""
+            });
+            if (coll) continue;
+
+            const total = idxs.length;
+            const off = Math.max(0, Math.min(groupOffsets[name] || 0, Math.max(0, total - groupLimit)));
+            const end = Math.min(total, off + groupLimit);
+
+            for (let j = off; j < end; j++) {
+                const e = history.get(idxs[j]);
+                const key = e.time + "|" + e.summary;
+                rows.append({
+                    rowType: "item", groupName: name,
+                    summary: e.summary, body: e.body, appName: e.appName,
+                    appIcon: e.appIcon, image: e.image, time: e.time,
+                    hIndex: idxs[j], grpCount: idxs.length, collapsed: false,
+                    expanded: expandedSet[key] === true, rowKey: key
+                });
+            }
+
+            // pager: only when the group has more entries than the limit
+            if (total > groupLimit) {
+                rows.append({
+                    rowType: "pager", groupName: name,
+                    summary: (off + 1) + "–" + end + " of " + total, body: "", appName: "",
+                    appIcon: "", image: "", time: 0,
+                    hIndex: off, grpCount: total, collapsed: false,
+                    expanded: false, rowKey: ""
+                });
+            }
+        }
+        groupCount = order.length;
+        allCollapsed = order.length > 0 && collapsedN === order.length;
+        rowsRebuilt();
+    }
+
+    // ---- sound ----------------------------------------------------------------
+    // Plays a freedesktop sound-theme file (package: sound-theme-freedesktop) via
+    // pipewire/pulse; falls back to libcanberra if the file isn't there.
+    function playSound(name) {
+        if (!soundEnabled) return;
+        Quickshell.execDetached([
+            "sh", "-c",
+            'f="/usr/share/sounds/freedesktop/stereo/$1.oga"; '
+            + 'if [ -f "$f" ]; then pw-play "$f" 2>/dev/null || paplay "$f" 2>/dev/null; '
+            + 'else canberra-gtk-play -i "$1" 2>/dev/null; fi',
+            "sh", name
+        ]);
+    }
+
+    function dndBlocks(n) {
+        if (!dnd) return false;
+        const app = (n.appName || "").toLowerCase();
+        if (app === "battery") return false;              // always show battery alerts
+        if (n.urgency !== NotificationUrgency.Critical) return true;
+        for (let i = 0; i < dndMuteCritical.length; i++)
+            if (app.indexOf(dndMuteCritical[i]) >= 0) return true;
+        return false;
+    }
+
+    function soundFor(n) {
+        if (n.appName === "Todo") return "alarm-clock-elapsed";
+        if (n.urgency === NotificationUrgency.Critical) return "dialog-warning";
+        return "message-new-instant";
     }
 
     IpcHandler {
@@ -90,6 +433,9 @@ Scope {
         function close(): void { root.panelOpen = false; }
         function clear(): void { root.clearHistory(); }
         function dnd(): void { root.toggleDnd(); }
+        function isDnd(): bool { return root.dnd; }
+        function sound(): void { root.toggleSound(); }
+        function collapseAll(): void { root.toggleCollapseAll(); }
     }
 
     // ---- persisted UI state -------------------------------------------------
@@ -105,9 +451,17 @@ Scope {
             try {
                 const s = JSON.parse(text());
                 if (typeof s.dnd === "boolean") root.dnd = s.dnd;
+                if (typeof s.soundEnabled === "boolean") root.soundEnabled = s.soundEnabled;
                 if (typeof s.menuSize === "number") root.menuSize = Math.max(60, Math.min(200, Math.round(s.menuSize)));
+                if (typeof s.textSize === "number") root.textSize = Math.max(60, Math.min(200, Math.round(s.textSize)));
                 if (typeof s.offsetX === "number") root.offsetX = s.offsetX;
                 if (typeof s.offsetY === "number") root.offsetY = s.offsetY;
+                if (Array.isArray(s.collapsed)) {
+                    const c = {};
+                    for (let i = 0; i < s.collapsed.length; i++) c[String(s.collapsed[i])] = true;
+                    root.collapsedApps = c;
+                    root.scheduleRebuild();
+                }
             } catch (e) { console.warn("Notifications: bad state file: " + e); }
             root.stateReady = true;
         }
@@ -130,11 +484,16 @@ Scope {
         onTriggered: {
             // not loaded yet / directories not created yet: try again shortly
             if (!root.stateReady || !root.dirsReady) { stateTimer.restart(); return; }
+            const coll = [];
+            for (const k in root.collapsedApps) if (root.collapsedApps[k]) coll.push(k);
             stateFile.setText(JSON.stringify({
                 dnd: root.dnd,
+                soundEnabled: root.soundEnabled,
                 menuSize: root.menuSize,
+                textSize: root.textSize,
                 offsetX: root.offsetX,
-                offsetY: root.offsetY
+                offsetY: root.offsetY,
+                collapsed: coll
             }));
         }
     }
@@ -163,6 +522,7 @@ Scope {
                 }
             } catch (e) { console.warn("Notifications: bad history file: " + e); }
             root.historyReady = true;
+            root.scheduleRebuild();
         }
         onLoadFailed: root.historyReady = true
     }
@@ -188,10 +548,19 @@ Scope {
         imageSupported: true
 
         onNotification: n => {
-            n.tracked = !(root.dnd && n.urgency !== NotificationUrgency.Critical);
+            if (n.lastGeneration) return;
+            n.tracked = !root.dndBlocks(n);
+            if (n.tracked) root.playSound(root.soundFor(n));
             if (n.transient) return;
 
             const img = (n.image && !String(n.image).startsWith("image://")) ? String(n.image) : "";
+            // show the newest entries of that app again
+            if (root.groupOffsets[root.groupKey(n.appName)]) {
+                const o = {};
+                for (const k in root.groupOffsets) o[k] = root.groupOffsets[k];
+                delete o[root.groupKey(n.appName)];
+                root.groupOffsets = o;
+            }
             history.insert(0, {
                 summary: n.summary || "",
                 body: n.body || "",
@@ -202,10 +571,11 @@ Scope {
             });
             if (history.count > root.maxHistory) history.remove(root.maxHistory, history.count - root.maxHistory);
             saveTimer.restart();
+            root.scheduleRebuild();
         }
     }
 
-    // ---- battery alerts (event driven; the old 30 s poll is removed) --------
+    // ---- battery alerts (event driven) ----------------------------------------
     property real lastBat: -1
     property bool bat20: false
     property bool bat15: false
@@ -236,6 +606,7 @@ Scope {
 
     Component.onCompleted: {
         checkBattery();
+        scheduleRebuild();
     }
     Connections {
         target: UPower.displayDevice
@@ -249,10 +620,11 @@ Scope {
     }
 
     // ---- reusable pieces ------------------------------------------------------
+    // text follows the component scale AND the text size
     component Lbl: Text {
         property real ui: 1
         property real sz: 10
-        font.pixelSize: Math.round(sz * ui)
+        font.pixelSize: Math.round(sz * ui * root.tx)
         color: Theme.text
         elide: Text.ElideRight
     }
@@ -262,6 +634,7 @@ Scope {
         property real ui: 1
         property real size: 40
         property string src: ""
+        property string glyph: "󰂚"
         width: Math.round(size * ui)
         height: width
         radius: Math.round(8 * ui)
@@ -278,7 +651,7 @@ Scope {
         Text {
             anchors.centerIn: parent
             visible: im.status !== Image.Ready
-            text: "󰂚"
+            text: th.glyph
             font.family: Theme.iconFont
             font.pixelSize: Math.round(th.size * 0.45 * th.ui)
             color: Theme.text
@@ -288,6 +661,7 @@ Scope {
     component IconBtn: Rectangle {
         id: b
         property real ui: 1
+        property real base: 24
         property string icon: ""
         property string tip: ""
         property color tint: Theme.text
@@ -295,16 +669,16 @@ Scope {
         property real hot: 0.2
         property bool tipReady: false
         signal clicked()
-        width: Math.round(24 * ui)
+        width: Math.round(base * ui)
         height: width
-        radius: Math.round(8 * ui)
+        radius: Math.round(base / 3 * ui)
         color: Theme.alpha(tint, area.containsMouse ? hot : rest)
 
         Text {
             anchors.centerIn: parent
             text: b.icon
             font.family: Theme.iconFont
-            font.pixelSize: Math.round(13 * b.ui)
+            font.pixelSize: Math.round(b.base * 0.54 * b.ui)
             color: b.tint
         }
         MouseArea {
@@ -325,6 +699,7 @@ Scope {
             anchors.top: parent.bottom
             anchors.topMargin: 6
             anchors.right: parent.right
+            z: 100
             width: tipText.implicitWidth + Math.round(14 * b.ui)
             height: tipText.implicitHeight + Math.round(8 * b.ui)
             radius: Math.round(7 * b.ui)
@@ -335,16 +710,6 @@ Scope {
         }
     }
 
-    component SizeBtn: Text {
-        id: sb
-        signal clicked()
-        height: 16
-        verticalAlignment: Text.AlignVCenter
-        horizontalAlignment: Text.AlignHCenter
-        color: Theme.text
-        MouseArea { anchors.fill: parent; onClicked: sb.clicked() }
-    }
-
     // ---- the window: only exists while mounted --------------------------------
     LazyLoader {
         active: root.mounted
@@ -353,8 +718,7 @@ Scope {
             id: win
 
             // The window can be created with panelOpen already true; bind
-            // `reveal` one tick later so the panel still fades in
-            // (same trick as wheel.qml).
+            // `reveal` one tick later so the panel still fades in.
             property bool reveal: false
 
             anchors { top: true; bottom: true; right: true; left: true }
@@ -368,21 +732,14 @@ Scope {
             mask: Region { item: root.panelOpen ? backdrop : stack }
 
             // Bounds that keep the panel on screen. These only shape what is
-            // DISPLAYED (effX/effY); the saved offsets are never rewritten by
-            // them. A freshly created window briefly has a transient size, and
-            // clamping/storing against that used to wreck the saved position.
+            // DISPLAYED (effX/effY); the saved offsets are never rewritten by them.
             readonly property real limMaxX: root.sideGap - root.edgeGap
             readonly property real limMinX: Math.min(limMaxX, root.cardWidth + root.sideGap + root.edgeGap - win.width)
-            readonly property real limMinY: root.edgeGap + root.px(14) - root.topGap
+            readonly property real limMinY: root.edgeGap - root.topGap
             readonly property real limMaxY: Math.max(limMinY, win.height - panel.height - root.edgeGap - root.topGap)
             readonly property bool sized: win.width > 0 && win.height > 0
             readonly property real effX: sized ? Math.max(limMinX, Math.min(limMaxX, root.offsetX)) : root.offsetX
             readonly property real effY: sized ? Math.max(limMinY, Math.min(limMaxY, root.offsetY)) : root.offsetY
-
-            function setSize(v) {
-                root.menuSize = Math.max(60, Math.min(200, v));
-                stateTimer.restart();
-            }
 
             // Only called while the user is dragging (window is fully sized then).
             function setPosition(x, y) {
@@ -410,6 +767,7 @@ Scope {
                 }
             }
 
+            // ======================= TOASTS ====================================
             Column {
                 id: stack
                 visible: !root.panelOpen
@@ -430,13 +788,25 @@ Scope {
                         property bool shown: false
                         property bool leaving: false
                         property bool wasExpired: false
+                        property bool notificationClosed: false
+                        property bool expanded: false
+                        property bool copied: false
+                        // invisible countdown: drives the toast lifetime (no UI)
+                        property real lifeLeft: 1
                         readonly property bool critical: modelData.urgency === NotificationUrgency.Critical
 
+                        readonly property bool persistent: modelData.expireTimeout === 0
+                        readonly property int lifetime: persistent ? 0 : modelData.expireTimeout > 0
+                            ? modelData.expireTimeout : (critical ? root.criticalTimeout : root.normalTimeout)
+                        function restartLifetime() {
+                            if (persistent) progAnim.stop();
+                            else if (!leaving && !notificationClosed) progAnim.restart();
+                        }
                         width: root.cardWidth
                         height: card.height
 
                         function close(expired) {
-                            if (leaving) return;
+                            if (leaving || notificationClosed) return;
                             wasExpired = expired;
                             leaving = true;
                             shown = false;
@@ -446,36 +816,73 @@ Scope {
 
                         Timer {
                             id: gone
-                            interval: 220
-                            onTriggered: wrapper.wasExpired ? wrapper.modelData.expire() : wrapper.modelData.dismiss()
+                            interval: 400
+                            onTriggered: {
+                                const n = wrapper.modelData;
+                                if (!n || wrapper.notificationClosed || !n.tracked) return;
+                                try {
+                                    if (wrapper.wasExpired) n.expire(); else n.dismiss();
+                                } catch (e) { }
+                            }
                         }
 
-                        Timer {
-                            interval: wrapper.modelData.expireTimeout > 0 ? wrapper.modelData.expireTimeout * 1000 : 6000
-                            running: !wrapper.critical && !hover.containsMouse && !wrapper.leaving
-                            onTriggered: wrapper.close(true)
+                        Timer { id: copiedTimer; interval: 900; onTriggered: wrapper.copied = false }
+
+                        // The toast's lifetime. Nothing is drawn: this just counts
+                        // down, pauses while the card is hovered or expanded, and
+                        // closes the toast when it runs out.
+                        NumberAnimation {
+                            id: progAnim
+                            target: wrapper
+                            property: "lifeLeft"
+                            from: 1
+                            to: 0
+                            duration: wrapper.lifetime
+                            running: !wrapper.leaving && !wrapper.persistent && !wrapper.notificationClosed
+                            paused: hh.hovered || wrapper.expanded
+                            onFinished: wrapper.close(true)
+                        }
+
+                        // a replaced/updated notification gets a fresh lifetime
+                        Connections {
+                            target: wrapper.modelData
+                            function onClosed(reason) { wrapper.notificationClosed = true; gone.stop(); progAnim.stop(); }
+                            function onSummaryChanged() { wrapper.restartLifetime(); }
+                            function onBodyChanged() { wrapper.restartLifetime(); }
+                            function onExpireTimeoutChanged() { wrapper.restartLifetime(); }
                         }
 
                         Rectangle {
                             id: card
                             width: parent.width
-                            height: Math.max(root.px(64), content.implicitHeight + root.px(20))
+                            height: Math.max(root.px(64), content.implicitHeight + root.px(24))
                             radius: root.px(16)
                             color: Theme.bg
                             border.width: wrapper.critical ? 1 : 0
-                            border.color: Theme.danger
+                            border.color: Theme.accent
                             opacity: wrapper.shown ? 1 : 0
 
-                            Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InOutQuad } }
+                            // slides in from the right edge of the screen (and
+                            // back out the same way) while fading
+                            x: wrapper.shown ? 0 : root.cardWidth + root.sideGap
 
+                            Behavior on x { NumberAnimation { duration: 380; easing.type: Easing.OutCubic } }
+                            Behavior on opacity { NumberAnimation { duration: 320; easing.type: Easing.InOutQuad } }
+
+                            HoverHandler { id: hh }
+
+                            // left click: dismiss, right click: copy
                             MouseArea {
-                                id: hover
                                 anchors.fill: parent
-                                hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 onClicked: mouse => {
-                                    if (mouse.button === Qt.RightButton) root.copyText(wrapper.modelData.summary, wrapper.modelData.body);
-                                    wrapper.close(false);
+                                    if (mouse.button === Qt.RightButton) {
+                                        root.copyText(wrapper.modelData.summary, wrapper.modelData.body);
+                                        wrapper.copied = true;
+                                        copiedTimer.restart();
+                                    } else {
+                                        wrapper.close(false);
+                                    }
                                 }
                             }
 
@@ -488,16 +895,25 @@ Scope {
                                     id: thumb
                                     ui: root.ui
                                     color: Theme.bg
-                                    src: root.thumbSrc(wrapper.modelData.image, wrapper.modelData.appIcon)
+                                    src: root.resolveIcon(wrapper.modelData.image, wrapper.modelData.appIcon,
+                                                          wrapper.modelData.appName, wrapper.modelData.summary)
+                                    glyph: root.glyphFor(wrapper.modelData.appName, wrapper.modelData.summary)
                                     anchors.verticalCenter: parent.verticalCenter
                                 }
 
                                 Column {
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: root.px(3)
-                                    width: parent.width - thumb.width - parent.spacing
+                                    width: parent.width - thumb.width - btnCol.width - parent.spacing * 2
 
-                                    Lbl { ui: root.ui; sz: 12; font.bold: true; width: parent.width; text: wrapper.modelData.summary }
+                                    Lbl {
+                                        ui: root.ui
+                                        sz: 12
+                                        font.bold: true
+                                        width: parent.width
+                                        text: wrapper.modelData.summary
+                                        wrapMode: wrapper.expanded ? Text.WordWrap : Text.NoWrap
+                                    }
                                     Lbl {
                                         ui: root.ui
                                         width: parent.width
@@ -506,7 +922,7 @@ Scope {
                                         color: Theme.textDim
                                         textFormat: Text.PlainText
                                         wrapMode: Text.WordWrap
-                                        maximumLineCount: 3
+                                        maximumLineCount: wrapper.expanded ? 200 : 3
                                     }
                                     Lbl { ui: root.ui; sz: 9; width: parent.width; text: wrapper.modelData.appName; color: Theme.textDim; opacity: 0.7 }
 
@@ -535,34 +951,89 @@ Scope {
                                         }
                                     }
                                 }
+
+                                Column {
+                                    id: btnCol
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: root.px(4)
+                                    opacity: hh.hovered ? 1 : 0.45
+                                    Behavior on opacity { NumberAnimation { duration: 120 } }
+
+                                    IconBtn {
+                                        ui: root.ui
+                                        base: 22
+                                        icon: wrapper.copied ? root.icCheck : root.icCopy
+                                        tip: "Copy"
+                                        onClicked: {
+                                            root.copyText(wrapper.modelData.summary, wrapper.modelData.body);
+                                            wrapper.copied = true;
+                                            copiedTimer.restart();
+                                        }
+                                    }
+                                    IconBtn {
+                                        ui: root.ui
+                                        base: 22
+                                        visible: root.canExpand(wrapper.modelData.body)
+                                        icon: wrapper.expanded ? root.icUp : root.icDown
+                                        tip: wrapper.expanded ? "Collapse" : "Expand"
+                                        onClicked: wrapper.expanded = !wrapper.expanded
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
 
+            // ======================= PANEL =====================================
+            // Clipping window: it opens from the top downward (and closes back
+            // up) revealing the panel without squashing it. The panel inside
+            // always keeps its full size.
             Item {
-                id: dragHandle
-                visible: panel.visible
-                opacity: panel.opacity
-                height: root.px(14)
-                anchors { bottom: panel.top; left: panel.left; right: panel.right }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: root.px(36)
-                    height: root.px(4)
-                    radius: height / 2
-                    color: Theme.text
-                    opacity: (dragArea.containsMouse || root.dragging) ? 0.35 : 0.1
-                    Behavior on opacity { NumberAnimation { duration: 150 } }
+                id: panelClip
+                width: root.cardWidth
+                height: panel.height * grow
+                clip: true
+                visible: panel.opacity > 0
+                anchors {
+                    top: parent.top
+                    topMargin: root.topGap + win.effY
+                    right: parent.right
+                    rightMargin: root.sideGap - win.effX
                 }
 
+                property real grow: win.reveal ? 1 : 0
+                Behavior on grow {
+                    NumberAnimation {
+                        duration: win.reveal ? 240 : 200
+                        easing.type: win.reveal ? Easing.OutCubic : Easing.InOutCubic
+                    }
+                }
+
+            Rectangle {
+                id: panel
+                width: root.cardWidth
+                height: panelCol.height + root.px(28)
+                radius: root.px(20)
+                color: Theme.bg
+                opacity: win.reveal ? 1 : 0
+
+                Behavior on opacity {
+                    NumberAnimation {
+                        duration: win.reveal ? 150 : 170
+                        easing.type: Easing.InOutQuad
+                    }
+                }
+
+                MouseArea { anchors.fill: parent }
+
+                // drag strip: invisible, runs along the whole top edge of the panel
+                // (same height as the panel's top padding, so it never covers the header)
                 MouseArea {
                     id: dragArea
-                    anchors.fill: parent
+                    anchors { top: parent.top; left: parent.left; right: parent.right }
+                    height: root.px(14)
                     enabled: root.panelOpen
-                    hoverEnabled: true
                     acceptedButtons: Qt.LeftButton
                     cursorShape: root.dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor
 
@@ -597,29 +1068,7 @@ Scope {
                         root.dragging = false;
                         stateTimer.restart();
                     }
-
-                    onDoubleClicked: root.resetPosition()
                 }
-            }
-
-            Rectangle {
-                id: panel
-                width: root.cardWidth
-                height: panelCol.height + root.px(28)
-                radius: root.px(20)
-                color: Theme.bg
-                anchors {
-                    top: parent.top
-                    topMargin: root.topGap + win.effY
-                    right: parent.right
-                    rightMargin: root.sideGap - win.effX
-                }
-                opacity: win.reveal ? 1 : 0
-                visible: opacity > 0
-
-                Behavior on opacity { NumberAnimation { duration: 200; easing.type: Easing.InOutQuad } }
-
-                MouseArea { anchors.fill: parent }
 
                 Column {
                     id: panelCol
@@ -645,16 +1094,23 @@ Scope {
 
                             IconBtn {
                                 ui: root.ui
-                                icon: root.dnd ? "󰂛" : "󰂚"
-                                tip: "Do Not Disturb: " + (root.dnd ? "ON" : "OFF")
-                                rest: root.dnd ? 0.3 : 0.08
-                                onClicked: root.toggleDnd()
+                                icon: root.soundEnabled ? "󰕾" : "󰖁"
+                                tip: "Sound: " + (root.soundEnabled ? "ON" : "OFF")
+                                rest: root.soundEnabled ? 0.08 : 0.3
+                                onClicked: root.toggleSound()
+                            }
+                            IconBtn {
+                                ui: root.ui
+                                visible: root.groupCount > 1
+                                icon: root.allCollapsed ? root.icDown : root.icUp
+                                tip: root.allCollapsed ? "Expand all groups" : "Collapse all groups"
+                                onClicked: root.toggleCollapseAll()
                             }
                             IconBtn {
                                 ui: root.ui
                                 icon: "󰆴"
                                 tip: "Clear all"
-                                tint: Theme.danger
+                                tint: Theme.accent
                                 rest: 0.1
                                 hot: 0.25
                                 visible: history.count > 0
@@ -682,113 +1138,407 @@ Scope {
                         width: parent.width
                         height: Math.min(contentHeight, win.height - root.topGap - root.px(120))
                         clip: true
-                        spacing: root.px(8)
-                        model: history
+                        spacing: root.px(6)
+                        model: rows
                         boundsBehavior: Flickable.StopAtBounds
 
-                        delegate: Rectangle {
-                            id: entry
+                        // keep the scroll position when the grouped model is rebuilt
+                        property real keepY: 0
+
+                        // Smooth scrolling inside a group, with a clear direction:
+                        // the leaving row slips away first (up when scrolling to
+                        // older entries, down when scrolling to newer ones), then
+                        // the entering row slides in from the opposite side after a
+                        // short pause, while the rest glide into place. Only active
+                        // during a scroll so normal rebuilds don't flash.
+                        add: root.animateRows ? addTrans : null
+                        remove: root.animateRows ? removeTrans : null
+                        displaced: root.animateRows ? displacedTrans : null
+                        Transition {
+                            id: addTrans
+                            SequentialAnimation {
+                                // keep the new row invisible during the pause
+                                // (otherwise it would flash at full opacity first)
+                                PropertyAction { property: "opacity"; value: 0 }
+                                PropertyAction { property: "scale"; value: 0.92 }
+                                PauseAnimation { duration: 180 }
+                                ParallelAnimation {
+                                    NumberAnimation { property: "opacity"; to: 1; duration: 340; easing.type: Easing.OutCubic }
+                                    NumberAnimation { property: "scale"; to: 1; duration: 340; easing.type: Easing.OutCubic }
+                                }
+                            }
+                        }
+                        Transition {
+                            id: removeTrans
+                            ParallelAnimation {
+                                NumberAnimation { property: "opacity"; to: 0; duration: 220; easing.type: Easing.InCubic }
+                                NumberAnimation { property: "scale"; to: 0.92; duration: 220; easing.type: Easing.InCubic }
+                            }
+                        }
+                        Transition {
+                            id: displacedTrans
+                            NumberAnimation { properties: "y"; duration: 340; easing.type: Easing.OutCubic }
+                        }
+                        Connections {
+                            target: root
+                            function onRowsAboutToRebuild() { list.keepY = list.contentY; }
+                            function onRowsRebuilt() {
+                                Qt.callLater(function () {
+                                    list.contentY = Math.max(0, Math.min(list.keepY, list.contentHeight - list.height));
+                                });
+                            }
+                        }
+
+                        delegate: Item {
+                            id: rowItem
                             required property int index
+                            required property string rowType
+                            required property string groupName
                             required property string summary
                             required property string body
                             required property string appName
                             required property string appIcon
                             required property string image
                             required property real time
+                            required property int hIndex
+                            required property int grpCount
+                            required property bool collapsed
+                            required property bool expanded
+                            required property string rowKey
 
+                            readonly property bool isHeader: rowType === "header"
+                            readonly property bool isPager: rowType === "pager"
                             property bool copied: false
+                            readonly property real pad: (isHeader && index > 0) ? root.px(6) : 0
 
                             width: list.width
-                            height: Math.max(root.px(56), textCol.implicitHeight + root.px(20))
-                            radius: root.px(12)
-                            color: Theme.alpha(Theme.text, entry.copied ? 0.2 : 0.06)
+                            height: pad + (isHeader ? headerBox.height : (isPager ? pagerBox.height : itemBox.height))
 
-                            Timer { id: copiedTimer; interval: 600; onTriggered: entry.copied = false }
-                            MouseArea {
-                                anchors.fill: parent
-                                onClicked: {
-                                    root.copyText(entry.summary, entry.body);
-                                    entry.copied = true;
-                                    copiedTimer.restart();
-                                }
+                            Timer { id: copiedTimer; interval: 900; onTriggered: rowItem.copied = false }
+
+                            // ---------- staggered entry (when the panel opens) ----------
+                            property real enter: 1
+                            transform: Translate { y: (1 - rowItem.enter) * root.px(14) }
+
+                            function playEnter() {
+                                enterAnim.stop();
+                                rowItem.enter = 0;
+                                rowItem.opacity = 0;
+                                enterDelay.interval = 90 + Math.min(rowItem.index, 8) * 45;
+                                enterDelay.restart();
+                            }
+                            Component.onCompleted: { if (root.opening) rowItem.playEnter(); }
+
+                            Timer { id: enterDelay; onTriggered: enterAnim.start() }
+                            ParallelAnimation {
+                                id: enterAnim
+                                NumberAnimation { target: rowItem; property: "enter"; from: 0; to: 1; duration: 320; easing.type: Easing.OutCubic }
+                                NumberAnimation { target: rowItem; property: "opacity"; from: 0; to: 1; duration: 280; easing.type: Easing.OutCubic }
+                            }
+                            Connections {
+                                target: root
+                                function onPanelOpenChanged() { if (root.panelOpen) rowItem.playEnter(); }
                             }
 
-                            Thumb {
-                                id: eThumb
-                                ui: root.ui
-                                size: 32
-                                color: Theme.alpha(Theme.text, 0.1)
-                                src: root.thumbSrc(entry.image, entry.appIcon)
-                                anchors { left: parent.left; leftMargin: root.px(10); verticalCenter: parent.verticalCenter }
-                            }
+                            // ---------- group header ----------
+                            Rectangle {
+                                id: headerBox
+                                visible: rowItem.isHeader
+                                y: rowItem.pad
+                                width: parent.width
+                                height: root.px(30)
+                                radius: root.px(10)
+                                color: Theme.alpha(Theme.text, hdrArea.containsMouse ? 0.1 : 0.04)
 
-                            Column {
-                                id: textCol
-                                anchors { left: eThumb.right; leftMargin: root.px(10); right: delBtn.left; rightMargin: root.px(8); verticalCenter: parent.verticalCenter }
-                                spacing: root.px(2)
-
-                                Lbl { ui: root.ui; sz: 11; font.bold: true; width: parent.width; text: entry.summary }
-                                Lbl {
-                                    ui: root.ui
-                                    width: parent.width
-                                    visible: text !== ""
-                                    text: entry.body
-                                    color: Theme.textDim
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.WordWrap
-                                    maximumLineCount: 3
+                                MouseArea {
+                                    id: hdrArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onClicked: root.toggleCollapse(rowItem.groupName)
                                 }
-                                Lbl {
-                                    ui: root.ui
-                                    sz: 9
-                                    width: parent.width
-                                    color: Theme.textDim
-                                    opacity: 0.7
-                                    text: (entry.appName !== "" ? entry.appName + " · " : "") + root.fmtTime(entry.time)
-                                }
-                            }
-
-                            Item {
-                                id: delBtn
-                                width: root.px(24)
-                                height: width
-                                anchors { right: parent.right; rightMargin: root.px(8); verticalCenter: parent.verticalCenter }
 
                                 Text {
-                                    anchors.centerIn: parent
-                                    text: "󰅖"
+                                    id: chev
+                                    anchors { left: parent.left; leftMargin: root.px(8); verticalCenter: parent.verticalCenter }
+                                    text: rowItem.collapsed ? root.icRight : root.icDown
                                     font.family: Theme.iconFont
                                     font.pixelSize: root.px(13)
-                                    color: delArea.containsMouse ? Theme.danger : Theme.textDim
+                                    color: Theme.textDim
                                 }
-                                MouseArea { id: delArea; anchors.fill: parent; hoverEnabled: true; onClicked: root.removeHistory(entry.index) }
+                                Thumb {
+                                    id: hThumb
+                                    ui: root.ui
+                                    size: 18
+                                    color: "transparent"
+                                    src: root.resolveIcon("", rowItem.appIcon, rowItem.appName, rowItem.summary)
+                                    glyph: root.glyphFor(rowItem.appName, rowItem.summary)
+                                    anchors { left: chev.right; leftMargin: root.px(6); verticalCenter: parent.verticalCenter }
+                                }
+                                Lbl {
+                                    id: hName
+                                    anchors { left: hThumb.right; leftMargin: root.px(7); verticalCenter: parent.verticalCenter }
+                                    ui: root.ui
+                                    sz: 11
+                                    font.bold: true
+                                    text: rowItem.groupName
+                                }
+                                Rectangle {
+                                    id: badge
+                                    anchors { left: hName.right; leftMargin: root.px(6); verticalCenter: parent.verticalCenter }
+                                    width: Math.max(height, badgeTxt.implicitWidth + root.px(10))
+                                    height: root.px(16)
+                                    radius: height / 2
+                                    color: Theme.alpha(Theme.text, 0.12)
+                                    Lbl { id: badgeTxt; anchors.centerIn: parent; ui: root.ui; sz: 9; text: rowItem.grpCount }
+                                }
+                                // latest message as a preview while collapsed
+                                Lbl {
+                                    visible: rowItem.collapsed
+                                    anchors {
+                                        left: badge.right; leftMargin: root.px(8)
+                                        right: hClear.left; rightMargin: root.px(6)
+                                        verticalCenter: parent.verticalCenter
+                                    }
+                                    ui: root.ui
+                                    sz: 9
+                                    color: Theme.textDim
+                                    text: rowItem.summary
+                                }
+                                IconBtn {
+                                    id: hClear
+                                    ui: root.ui
+                                    base: 20
+                                    icon: "󰆴"
+                                    tip: "Clear " + rowItem.groupName
+                                    tint: Theme.accent
+                                    rest: 0.0
+                                    hot: 0.25
+                                    anchors { right: parent.right; rightMargin: root.px(6); verticalCenter: parent.verticalCenter }
+                                    onClicked: root.removeGroup(rowItem.groupName)
+                                }
+                            }
+
+                            // ---------- pager (scroll through a long group) ----------
+                            Item {
+                                id: pagerBox
+                                visible: rowItem.isPager
+                                x: root.px(6)
+                                width: parent.width - root.px(6)
+                                height: root.px(22)
+                                Row {
+                                    anchors { right: parent.right; rightMargin: root.px(6); verticalCenter: parent.verticalCenter }
+                                    spacing: root.px(4)
+                                    IconBtn {
+                                        ui: root.ui
+                                        base: 18
+                                        rest: 0.06
+                                        icon: root.icUp
+                                        tip: "Newer"
+                                        opacity: rowItem.hIndex > 0 ? 1 : 0.3
+                                        onClicked: root.scrollGroup(rowItem.groupName, -1)
+                                    }
+                                    IconBtn {
+                                        ui: root.ui
+                                        base: 18
+                                        rest: 0.06
+                                        icon: root.icDown
+                                        tip: "Older"
+                                        opacity: rowItem.hIndex + root.groupLimit < rowItem.grpCount ? 1 : 0.3
+                                        onClicked: root.scrollGroup(rowItem.groupName, 1)
+                                    }
+                                }
+                            }
+
+                            // ---------- notification entry ----------
+                            Rectangle {
+                                id: itemBox
+                                visible: rowItem.rowType === "item"
+                                x: root.px(6)
+                                width: parent.width - root.px(6)
+                                height: Math.max(root.px(52), textCol.implicitHeight + root.px(20))
+                                radius: root.px(12)
+                                color: Theme.alpha(Theme.text, rowItem.copied ? 0.2 : 0.06)
+
+                                // expand / collapse glides instead of jumping; content is
+                                // clipped only while the height is animating so tooltips
+                                // can still overflow the card the rest of the time
+                                clip: heightAnim.running
+                                Behavior on height {
+                                    NumberAnimation { id: heightAnim; duration: 220; easing.type: Easing.OutCubic }
+                                }
+
+                                // wheel scrolls through the group's entries; at either
+                                // end the event is passed on so the whole list scrolls
+                                WheelHandler {
+                                    enabled: rowItem.grpCount > root.groupLimit
+                                    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                                    onWheel: event => {
+                                        const d = event.angleDelta.y;
+                                        if (d === 0) { event.accepted = false; return; }
+                                        event.accepted = root.scrollGroup(rowItem.groupName, d < 0 ? 1 : -1);
+                                    }
+                                }
+
+                                Thumb {
+                                    id: eThumb
+                                    ui: root.ui
+                                    size: 30
+                                    color: Theme.alpha(Theme.text, 0.1)
+                                    src: root.resolveIcon(rowItem.image, rowItem.appIcon, rowItem.appName, rowItem.summary)
+                                    glyph: root.glyphFor(rowItem.appName, rowItem.summary)
+                                    anchors { left: parent.left; leftMargin: root.px(10); top: parent.top; topMargin: root.px(10) }
+                                }
+
+                                Column {
+                                    id: textCol
+                                    anchors {
+                                        left: eThumb.right; leftMargin: root.px(10)
+                                        right: parent.right; rightMargin: root.px(8)
+                                        top: parent.top; topMargin: root.px(10)
+                                    }
+                                    spacing: root.px(3)
+
+                                    // title line + action buttons
+                                    Item {
+                                        width: parent.width
+                                        height: Math.max(root.px(20), eTitle.implicitHeight)
+
+                                        Lbl {
+                                            id: eTitle
+                                            anchors { left: parent.left; top: parent.top }
+                                            width: parent.width - eBtns.width - root.px(6)
+                                            ui: root.ui
+                                            sz: 11
+                                            font.bold: true
+                                            text: rowItem.summary
+                                            wrapMode: rowItem.expanded ? Text.WordWrap : Text.NoWrap
+                                        }
+                                        Row {
+                                            id: eBtns
+                                            anchors { right: parent.right; top: parent.top }
+                                            spacing: root.px(2)
+
+                                            IconBtn {
+                                                ui: root.ui
+                                                base: 20
+                                                rest: 0.0
+                                                visible: root.canExpand(rowItem.body)
+                                                icon: rowItem.expanded ? root.icUp : root.icDown
+                                                tip: rowItem.expanded ? "Collapse" : "Expand"
+                                                onClicked: root.toggleExpand(rowItem.index, rowItem.rowKey)
+                                            }
+                                            IconBtn {
+                                                ui: root.ui
+                                                base: 20
+                                                rest: 0.0
+                                                icon: rowItem.copied ? root.icCheck : root.icCopy
+                                                tip: "Copy"
+                                                onClicked: {
+                                                    root.copyText(rowItem.summary, rowItem.body);
+                                                    rowItem.copied = true;
+                                                    copiedTimer.restart();
+                                                }
+                                            }
+                                            IconBtn {
+                                                ui: root.ui
+                                                base: 20
+                                                rest: 0.0
+                                                icon: "󰅖"
+                                                tip: "Remove"
+                                                tint: Theme.accent
+                                                hot: 0.25
+                                                onClicked: root.removeHistory(rowItem.hIndex)
+                                            }
+                                        }
+                                    }
+
+                                    // collapsed body (2 lines)
+                                    Lbl {
+                                        ui: root.ui
+                                        width: parent.width
+                                        visible: !rowItem.expanded && text !== ""
+                                        text: rowItem.body
+                                        color: Theme.textDim
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.WordWrap
+                                        maximumLineCount: 2
+                                    }
+
+                                    // expanded body: selectable text. Selecting copies it
+                                    // to the clipboard (Ctrl+C also works).
+                                    TextEdit {
+                                        id: bodyEdit
+                                        visible: rowItem.expanded && rowItem.body !== ""
+                                        width: parent.width
+                                        height: visible ? implicitHeight : 0
+                                        readOnly: true
+                                        selectByMouse: true
+                                        persistentSelection: true
+                                        wrapMode: TextEdit.Wrap
+                                        textFormat: TextEdit.PlainText
+                                        text: rowItem.body
+                                        color: Theme.text
+                                        selectionColor: Theme.alpha(Theme.text, 0.3)
+                                        selectedTextColor: Theme.text
+                                        font.pixelSize: Math.round(10 * root.ui * root.tx)
+                                        Keys.onEscapePressed: root.panelOpen = false
+                                        onSelectedTextChanged: selTimer.restart()
+
+                                        Timer {
+                                            id: selTimer
+                                            interval: 450
+                                            onTriggered: {
+                                                if (bodyEdit.selectedText !== "") {
+                                                    root.copyRaw(bodyEdit.selectedText);
+                                                    rowItem.copied = true;
+                                                    copiedTimer.restart();
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Lbl {
+                                        ui: root.ui
+                                        sz: 9
+                                        width: parent.width
+                                        color: Theme.textDim
+                                        opacity: 0.7
+                                        text: (rowItem.appName !== "" ? rowItem.appName + " · " : "") + root.fmtTime(rowItem.time)
+                                    }
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            Row {
-                id: sizeRow
-                anchors { top: panel.bottom; topMargin: 6; left: panel.left }
-                spacing: 2
-                width: root.panelOpen ? implicitWidth : 0
-                height: root.panelOpen ? implicitHeight : 0
-                visible: root.panelOpen
-                opacity: sizeHover.hovered ? 0.9 : 0.18
-
-                Behavior on opacity { NumberAnimation { duration: 150 } }
-                HoverHandler { id: sizeHover }
-
-                SizeBtn { text: "−"; width: 16; font.pixelSize: 12; onClicked: win.setSize(root.menuSize - 10) }
-                SizeBtn { text: "+"; width: 16; font.pixelSize: 12; onClicked: win.setSize(root.menuSize + 10) }
-                SizeBtn {
-                    text: "↺"
-                    width: 16
-                    font.pixelSize: 12
-                    visible: root.movedFromDefault
-                    onClicked: root.resetPosition()
+                // Topmost overlay for wheel shortcuts (same as todo.qml):
+                //   Ctrl  + scroll -> text size only
+                //   Shift + scroll -> component scale
+                // Plain scroll passes through so the list scrolls normally.
+                // Starts below the drag strip so the strip keeps its cursor.
+                MouseArea {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.top: parent.top
+                    anchors.topMargin: dragArea.height
+                    z: 100
+                    enabled: root.panelOpen
+                    acceptedButtons: Qt.NoButton   // never steals clicks
+                    onWheel: function (wheel) {
+                        var dy = wheel.angleDelta.y !== 0 ? wheel.angleDelta.y : wheel.angleDelta.x;
+                        if (wheel.modifiers & Qt.ControlModifier) {
+                            root.wheelText(dy);
+                            wheel.accepted = true;
+                        } else if (wheel.modifiers & Qt.ShiftModifier) {
+                            root.wheelScale(dy);
+                            wheel.accepted = true;
+                        } else {
+                            wheel.accepted = false;
+                        }
+                    }
                 }
+            }
             }
         }
     }

@@ -11,15 +11,22 @@ hl.layer_rule({
 -- Opacity rules for all windows except fullscreen
 hl.window_rule({
     match = { class = ".*" },
-    opacity = "1.0 override",
+    opacity = "0.9 override",
 })
+
 hl.window_rule({
     match = { class = ".*", fullscreen = true },
     opacity = "1.0 override",
 })
 
+hl.layer_rule({
+    match = { namespace = "quickshell" },
+    blur = true,
+    ignore_alpha = 0.01,
+})
+
 --hl.window_rule({
---    name = "brave-opaque",
+--    name = "brave",
 --    match = { class = "^brave-browser$" },
 --    opacity = "1.0 override",
 --})
@@ -27,6 +34,14 @@ hl.window_rule({
 hl.window_rule({
     match = { class = "kitty" },
     suppress_event = "maximize",
+})
+
+hl.window_rule({
+    name = "file-picker-float",
+    match = { class = "^(xdg-desktop-portal-gtk)$" },
+    float = true,
+    center = true,
+    size = "900 600",
 })
 
 hl.window_rule({
@@ -57,4 +72,10 @@ hl.window_rule({
     name = "float-save-file",
     match = { title = "^(Save File)$" },
     float = true,
+})
+
+hl.layer_rule({
+    match = { namespace = "wallpaper-picker" },
+    blur = true,
+    ignore_alpha = 0.95,
 })
