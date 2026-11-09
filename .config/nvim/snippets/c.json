@@ -1,0 +1,40 @@
+{
+  "42 Header File Guard": {
+    "prefix": "guard",
+    "body": ["#ifndef ${1:HEADER_NAME}_H", "# define ${1:HEADER_NAME}_H", "", "$0", "", "#endif"],
+    "description": "Standard C Header Guard"
+  },
+  "File Documentation Header": {
+    "prefix": "doc",
+    "body": [
+      "/* ************************************************************************** */",
+      "/*                                                                            */",
+      "/*                                                        :::      ::::::::   */",
+      "/*   $TM_FILENAME                                       :+:      :+:    :+:   */",
+      "/*                                                    +:+ +:+         +:+     */",
+      "/*   By: walid <github.com/walid-olt>               +#+  +:+       +#+        */",
+      "/*                                                +#+#+#+#+      +#+          */",
+      "/*   Created: $CURRENT_YEAR/$CURRENT_MONTH/$CURRENT_DATE 00:00:00 by walid             #+#    #+#             */",
+      "/*   Updated: $CURRENT_YEAR/$CURRENT_MONTH/$CURRENT_DATE 00:00:00 by walid            ###   ########.fr       */",
+
+      "/*                                                                            */",
+      "/* ************************************************************************** */",
+      "",
+      "$0"
+    ],
+    "description": "Inserts file header with filename and current date"
+  },
+  "Main Function": {
+    "prefix": "main",
+    "body": [
+      "int\tmain(int argc, char **argv)",
+      "{",
+      "\t(void)argc;",
+      "\t(void)argv;",
+      "\t$0",
+      "\treturn (0);",
+      "}"
+    ],
+    "description": "42 Norm-compliant main function"
+  }
+}

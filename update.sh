@@ -406,6 +406,11 @@ if [[ -f "$SRC/.zshrc" ]]; then
     ensure_link "$SRC/.zshrc" "$HOME/.zshrc" ".zshrc"
 fi
 
+# ~/.gitconfig lives outside ~/.config too
+if [[ -f "$REPO_DIR/.gitconfig" ]]; then
+    ensure_link "$REPO_DIR/.gitconfig" "$HOME/.gitconfig" ".gitconfig"
+fi
+
 # Remove dangling links that point into the repo (deleted/renamed upstream)
 while IFS= read -r -d '' l; do
     t="$(readlink "$l")"

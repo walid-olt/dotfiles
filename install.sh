@@ -284,6 +284,17 @@ if [[ -f "$SRC/.zshrc" ]]; then
     success "Linked ~/.zshrc."
 fi
 
+# ~/.gitconfig is installed from .gitconfig but lives outside ~/.config too
+if [[ -f "$REPO_DIR/.gitconfig" ]]; then
+    if [[ -e "$HOME/.gitconfig" && ! -L "$HOME/.gitconfig" ]]; then
+        mkdir -p "$BACKUP_DIR/home"
+        mv "$HOME/.gitconfig" "$BACKUP_DIR/home/.gitconfig"
+        BACKED_UP_COUNT=$((BACKED_UP_COUNT + 1))
+    fi
+    ln -sfn "$REPO_DIR/.gitconfig" "$HOME/.gitconfig"
+    success "Linked ~/.gitconfig."
+fi
+
 # Generated files: copy once so configs that `include`/`source`/`@import`
 # them don't fail to parse before the first `theme apply` runs.
 for g in "${GENERATED_FILES[@]}"; do
